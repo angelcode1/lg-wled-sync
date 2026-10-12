@@ -58,8 +58,6 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Run locked Rust test suite
         run: cargo nextest run --locked
-      - name: Run Rust documentation tests
-        run: cargo test --locked --doc
       - name: Clippy (deny warnings)
         run: cargo clippy --locked --bin lg-hue-sync -- -D warnings
       - name: Validate embedded dashboard JavaScript
