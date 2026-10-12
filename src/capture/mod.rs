@@ -1,7 +1,7 @@
 pub mod dile_vt;
 pub mod drm_routing;
-pub mod media;
 pub mod histogram;
+pub mod media;
 pub mod vtcapture;
 
 use std::time::{Duration, Instant};

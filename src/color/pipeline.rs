@@ -27,16 +27,19 @@ pub struct ColorField {
 }
 
 impl ColorField {
-    pub fn source(&self) -> ColorSource { self.source }
+    pub fn source(&self) -> ColorSource {
+        self.source
+    }
 
     /// Bilinear interpolation between processed samples in screen coordinates,
     /// independent of LED count, protocol and physical channel identity.
     pub fn at(&self, x: f32, y: f32) -> RgbColor {
-        if self.pixels.len() != CELLS { return RgbColor::new(0, 0, 0); }
-        let x = ((x.clamp(0.0, 1.0) * GRID_WIDTH as f32) - 0.5)
-            .clamp(0.0, (GRID_WIDTH - 1) as f32);
-        let y = ((y.clamp(0.0, 1.0) * GRID_HEIGHT as f32) - 0.5)
-            .clamp(0.0, (GRID_HEIGHT - 1) as f32);
+        if self.pixels.len() != CELLS {
+            return RgbColor::new(0, 0, 0);
+        }
+        let x = ((x.clamp(0.0, 1.0) * GRID_WIDTH as f32) - 0.5).clamp(0.0, (GRID_WIDTH - 1) as f32);
+        let y =
+            ((y.clamp(0.0, 1.0) * GRID_HEIGHT as f32) - 0.5).clamp(0.0, (GRID_HEIGHT - 1) as f32);
         let x0 = x.floor() as usize;
         let y0 = y.floor() as usize;
         let x1 = (x0 + 1).min(GRID_WIDTH - 1);
@@ -77,12 +80,20 @@ impl ColorField {
                 totals[2] += c.b as u32;
             }
         }
-        RgbColor::new((totals[0] / 9) as u8, (totals[1] / 9) as u8, (totals[2] / 9) as u8)
+        RgbColor::new(
+            (totals[0] / 9) as u8,
+            (totals[1] / 9) as u8,
+            (totals[2] / 9) as u8,
+        )
     }
 
     #[cfg(test)]
     fn from_colors(source: ColorSource, pixels: Vec<RgbColor>) -> Self {
-        Self { source, scene_cut: false, pixels }
+        Self {
+            source,
+            scene_cut: false,
+            pixels,
+        }
     }
 }
 
@@ -111,10 +122,20 @@ impl ColorPipeline {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn tune(&mut self, saturation: f32, noise: f32, gamma: f32,
-        peak_weight: f32, rise: f32, fall: f32, strict_black: bool,
-        max_step: u8, tone_lift: bool, letterbox: bool,
-        spatial_blend: f32) {
+    pub fn tune(
+        &mut self,
+        saturation: f32,
+        noise: f32,
+        gamma: f32,
+        peak_weight: f32,
+        rise: f32,
+        fall: f32,
+        strict_black: bool,
+        max_step: u8,
+        tone_lift: bool,
+        letterbox: bool,
+        spatial_blend: f32,
+    ) {
         self.processor.set_saturation_boost(saturation);
         self.processor.set_noise_gate_threshold(noise);
         self.processor.set_gamma(gamma);
@@ -134,19 +155,29 @@ impl ColorPipeline {
         self.smoothed.fill(FloatColor::default());
     }
 
-    pub fn frame(&mut self, data: &[u8], width: u32, height: u32,
-        bgra: bool) -> Result<ColorField> {
+    pub fn frame(
+        &mut self,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        bgra: bool,
+    ) -> Result<ColorField> {
         let (w, h) = (width as usize, height as usize);
-        if w == 0 || h == 0
-            || w.checked_mul(h).and_then(|n| n.checked_mul(4))
-                .is_none_or(|needed| data.len() < needed) {
+        if w == 0
+            || h == 0
+            || w.checked_mul(h)
+                .and_then(|n| n.checked_mul(4))
+                .is_none_or(|needed| data.len() < needed)
+        {
             bail!("invalid decoded frame dimensions or buffer length");
         }
         // Recompute once per captured frame, rather than independently for
         // each vendor. Capture dimensions are already bounded by Config.
         let rect = if self.letterbox {
             ZoneSampler::detect_active_rect(data, width, height, bgra)
-        } else { Default::default() };
+        } else {
+            Default::default()
+        };
 
         let mut cells = Vec::with_capacity(CELLS);
         for y in 0..GRID_HEIGHT {
@@ -188,15 +219,19 @@ impl ColorPipeline {
                         (total[1] / 9) as u8,
                         (total[2] / 9) as u8,
                     ),
-                    peak, max_luma,
+                    peak,
+                    max_luma,
                 });
             }
         }
         Ok(self.process(cells, ColorSource::Frame))
     }
 
-    pub fn histogram(&mut self, regions: &[RgbColor; 16],
-        profile: &HistogramSettings) -> Result<ColorField> {
+    pub fn histogram(
+        &mut self,
+        regions: &[RgbColor; 16],
+        profile: &HistogramSettings,
+    ) -> Result<ColorField> {
         // Histogram regions do not contain pixels. Each grid cell inherits
         // a calibrated nearest-edge chromatic estimate. On unknown TVs
         // the average profile produces a genuinely uniform field.
@@ -206,9 +241,12 @@ impl ColorPipeline {
                 let px = (x as f32 + 0.5) / GRID_WIDTH as f32;
                 let py = (y as f32 + 0.5) / GRID_HEIGHT as f32;
                 let distances = [py, 1.0 - px, 1.0 - py, px];
-                let edge = distances.iter().enumerate()
+                let edge = distances
+                    .iter()
+                    .enumerate()
                     .min_by(|a, b| a.1.total_cmp(b.1))
-                    .map(|(i, _)| i).unwrap_or(0);
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
                 positions.push(match edge {
                     0 => Point { x: px, y: 0.0 },
                     1 => Point { x: 1.0, y: py },
@@ -218,10 +256,20 @@ impl ColorPipeline {
             }
         }
         let samples = profile.map_leds(regions, &positions)?;
-        if samples.len() != CELLS { bail!("histogram profile did not produce full colour grid"); }
-        Ok(self.process(samples.into_iter().map(|mean| RawCell {
-            peak: mean, max_luma: mean.luminance(), mean,
-        }).collect(), ColorSource::Histogram))
+        if samples.len() != CELLS {
+            bail!("histogram profile did not produce full colour grid");
+        }
+        Ok(self.process(
+            samples
+                .into_iter()
+                .map(|mean| RawCell {
+                    peak: mean,
+                    max_luma: mean.luminance(),
+                    mean,
+                })
+                .collect(),
+            ColorSource::Histogram,
+        ))
     }
 
     fn process(&mut self, raw: Vec<RawCell>, source: ColorSource) -> ColorField {
@@ -232,10 +280,16 @@ impl ColorPipeline {
             self.smoothed.fill(FloatColor::default());
             self.last_global = None;
         }
-        let elapsed = self.last_sample.replace(now)
+        let elapsed = self
+            .last_sample
+            .replace(now)
             .map(|previous| now.saturating_duration_since(previous))
             .unwrap_or(Duration::from_millis(33));
-        let elapsed = if source_changed { Duration::from_millis(33) } else { elapsed };
+        let elapsed = if source_changed {
+            Duration::from_millis(33)
+        } else {
+            elapsed
+        };
         self.last_source = Some(source);
 
         let mut sum = [0u64; 3];
@@ -250,23 +304,25 @@ impl ColorPipeline {
             (sum[2] / CELLS as u64) as u8,
         );
         let scene_cut = source_changed
-            || self.last_global.is_some_and(|prev| prev.delta(global) > 0.35);
+            || self
+                .last_global
+                .is_some_and(|prev| prev.delta(global) > 0.35);
         self.last_global = Some(global);
 
         let mut out = Vec::with_capacity(CELLS);
         for (i, cell) in raw.into_iter().enumerate() {
-            let mean = FloatColor::new(
-                cell.mean.r as f32, cell.mean.g as f32, cell.mean.b as f32,
-            );
-            let peak = FloatColor::new(
-                cell.peak.r as f32, cell.peak.g as f32, cell.peak.b as f32,
-            );
+            let mean = FloatColor::new(cell.mean.r as f32, cell.mean.g as f32, cell.mean.b as f32);
+            let peak = FloatColor::new(cell.peak.r as f32, cell.peak.g as f32, cell.peak.b as f32);
             // A newly selected source starts from its real first sample,
             // not black or stale colours from the previous backend.
-            let previous = if source_changed { mean } else { self.smoothed[i] };
-            let result = self.processor.process(
-                mean, peak, cell.max_luma, previous, scene_cut, elapsed,
-            );
+            let previous = if source_changed {
+                mean
+            } else {
+                self.smoothed[i]
+            };
+            let result =
+                self.processor
+                    .process(mean, peak, cell.max_luma, previous, scene_cut, elapsed);
             self.smoothed[i] = result;
             out.push(result.to_rgb());
         }
@@ -279,34 +335,52 @@ impl ColorPipeline {
                 for x in 0..GRID_WIDTH {
                     let index = y * GRID_WIDTH + x;
                     let center = original[index];
-                    if center == RgbColor::new(0,0,0) { continue; }
+                    if center == RgbColor::new(0, 0, 0) {
+                        continue;
+                    }
                     let mut totals = [0u32; 3];
                     let mut count = 0u32;
-                    for (dx,dy) in [(-1isize,0isize),(1,0),(0,-1),(0,1)] {
-                        let nx=x as isize+dx;
-                        let ny=y as isize+dy;
-                        if nx<0 || ny<0 || nx>=GRID_WIDTH as isize || ny>=GRID_HEIGHT as isize {continue;}
-                        let c=original[ny as usize*GRID_WIDTH+nx as usize];
-                        totals[0]+=c.r as u32;
-                        totals[1]+=c.g as u32;
-                        totals[2]+=c.b as u32;
-                        count+=1;
+                    for (dx, dy) in [(-1isize, 0isize), (1, 0), (0, -1), (0, 1)] {
+                        let nx = x as isize + dx;
+                        let ny = y as isize + dy;
+                        if nx < 0
+                            || ny < 0
+                            || nx >= GRID_WIDTH as isize
+                            || ny >= GRID_HEIGHT as isize
+                        {
+                            continue;
+                        }
+                        let c = original[ny as usize * GRID_WIDTH + nx as usize];
+                        totals[0] += c.r as u32;
+                        totals[1] += c.g as u32;
+                        totals[2] += c.b as u32;
+                        count += 1;
                     }
-                    if count == 0 {continue;}
+                    if count == 0 {
+                        continue;
+                    }
                     let avg = RgbColor::new(
-                        (totals[0]/count) as u8,
-                        (totals[1]/count) as u8,
-                        (totals[2]/count) as u8,
+                        (totals[0] / count) as u8,
+                        (totals[1] / count) as u8,
+                        (totals[2] / count) as u8,
                     );
                     let strength = self.spatial_blend;
-                    let mix=|a:u8,b:u8| ->
-                        u8 { (a as f32*(1.0-strength)+b as f32*strength).round() as u8 };
-                    out[index]=RgbColor::new(mix(center.r,avg.r),
-                        mix(center.g,avg.g),mix(center.b,avg.b));
+                    let mix = |a: u8, b: u8| -> u8 {
+                        (a as f32 * (1.0 - strength) + b as f32 * strength).round() as u8
+                    };
+                    out[index] = RgbColor::new(
+                        mix(center.r, avg.r),
+                        mix(center.g, avg.g),
+                        mix(center.b, avg.b),
+                    );
                 }
             }
         }
-        ColorField { source, scene_cut, pixels: out }
+        ColorField {
+            source,
+            scene_cut,
+            pixels: out,
+        }
     }
 }
 
@@ -318,10 +392,12 @@ mod tests {
     fn uniform_video_field_is_vendor_independent() {
         let mut pipeline = ColorPipeline::new(1.0, 0.0, false);
         let mut frame = vec![0u8; 320 * 180 * 4];
-        for px in frame.chunks_exact_mut(4) { px.copy_from_slice(&[100, 50, 20, 255]); }
+        for px in frame.chunks_exact_mut(4) {
+            px.copy_from_slice(&[100, 50, 20, 255]);
+        }
         let field = pipeline.frame(&frame, 320, 180, false).unwrap();
         assert_eq!(field.source(), ColorSource::Frame);
-        for p in [Point {x:0.0,y:0.0}, Point {x:0.9,y:0.2}] {
+        for p in [Point { x: 0.0, y: 0.0 }, Point { x: 0.9, y: 0.2 }] {
             let c = field.at(p.x, p.y);
             assert_eq!(c, RgbColor::new(100, 50, 20));
         }
@@ -330,21 +406,23 @@ mod tests {
     fn histogram_average_is_uniform_and_switch_resets_source() {
         let mut pipeline = ColorPipeline::new(1.0, 0.0, false);
         let colors = [RgbColor::new(32, 64, 96); 16];
-        let field = pipeline.histogram(&colors, &HistogramSettings::default()).unwrap();
+        let field = pipeline
+            .histogram(&colors, &HistogramSettings::default())
+            .unwrap();
         assert_eq!(field.source(), ColorSource::Histogram);
         assert_eq!(field.at(0.05, 0.05), field.at(0.95, 0.95));
     }
     #[test]
     fn bilinear_interpolation_is_stable_at_edges() {
-        let mut cells=vec![RgbColor::new(0, 0, 0); CELLS];
-        cells[0]=RgbColor::new(200,0,0);
-        let field=ColorField::from_colors(ColorSource::Frame,cells);
-        assert_eq!(field.at(0.0,0.0).r,200);
-        assert_eq!(field.at(1.0,1.0).r,0);
+        let mut cells = vec![RgbColor::new(0, 0, 0); CELLS];
+        cells[0] = RgbColor::new(200, 0, 0);
+        let field = ColorField::from_colors(ColorSource::Frame, cells);
+        assert_eq!(field.at(0.0, 0.0).r, 200);
+        assert_eq!(field.at(1.0, 1.0).r, 0);
     }
     #[test]
     fn invalid_frames_fail_without_emitting_synthetic_colours() {
-        let mut p = ColorPipeline::new(1.0,0.0,false);
-        assert!(p.frame(&[0; 3],320,180,false).is_err());
+        let mut p = ColorPipeline::new(1.0, 0.0, false);
+        assert!(p.frame(&[0; 3], 320, 180, false).is_err());
     }
 }

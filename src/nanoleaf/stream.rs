@@ -461,10 +461,13 @@ impl NanoleafPerimeterSampler {
     /// Physical Nanoleaf panel mapping expressed in shared screen coordinates.
     /// Output protocols remain independent from capture and region interpolation.
     pub fn screen_positions(&self) -> Vec<crate::output::perimeter::Point> {
-        self.zones.iter().map(|z| crate::output::perimeter::Point {
-            x: 0.5 * (z.x_min + z.x_max),
-            y: 0.5 * (z.y_min + z.y_max),
-        }).collect()
+        self.zones
+            .iter()
+            .map(|z| crate::output::perimeter::Point {
+                x: 0.5 * (z.x_min + z.x_max),
+                y: 0.5 * (z.y_min + z.y_max),
+            })
+            .collect()
     }
 
     pub fn set_spatial_blend(&mut self, strength: f32) {

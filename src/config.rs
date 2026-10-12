@@ -172,7 +172,9 @@ pub struct WledConfig {
     #[serde(default = "default_output_trim")]
     pub brightness_trim: f32,
 }
-fn default_wled_port() -> u16 { 21324 }
+fn default_wled_port() -> u16 {
+    21324
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -384,11 +386,14 @@ impl Config {
             });
         }
         for device in &self.wled_devices {
-            if device.enabled && (device.ip.trim().is_empty()
-                || device.udp_port == 0
-                || device.led_count == 0 || device.led_count > 65536
-                || !device.brightness_trim.is_finite()
-                || !(0.0..=4.0).contains(&device.brightness_trim)) {
+            if device.enabled
+                && (device.ip.trim().is_empty()
+                    || device.udp_port == 0
+                    || device.led_count == 0
+                    || device.led_count > 65536
+                    || !device.brightness_trim.is_finite()
+                    || !(0.0..=4.0).contains(&device.brightness_trim))
+            {
                 return Err(ConfigError::Invalid {
                     path: path.to_path_buf(),
                     reason: "invalid WLED destination/LED count/brightness trim",

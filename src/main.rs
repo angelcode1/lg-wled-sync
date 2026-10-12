@@ -24,19 +24,19 @@ use tracing_subscriber::FmtSubscriber;
 
 use capture::drm_routing::{DrmCaptureRouter, HistogramHealth, PlaybackClass, Source};
 use capture::histogram::HistogramCapture;
-use color::pipeline::{ColorField, ColorPipeline};
-use output::gate::OutputGate;
 use capture::{
     create_capture, detect_source_fps, CaptureRecovery, MockCapture, RecoveryAction, ScreenCapture,
     VtCapture,
 };
+use color::pipeline::{ColorField, ColorPipeline};
 use color::{RgbColor, ZoneSampler};
 use config::{Config, ConfigError};
 use hue::{sync_entertainment_areas, HueDtlsClient, HueStreamPacketBuilder};
 use nanoleaf::{NanoleafPerimeterSampler, NanoleafUdpStreamer};
-use output::{ColorSource, HueOutput, LightFrame, LightOutput};
+use output::gate::OutputGate;
 use output::perimeter::PerimeterSampler;
 use output::wled::WledUdpStreamer;
+use output::{ColorSource, HueOutput, LightFrame, LightOutput};
 use runtime::{PendingCommands, PipelineState, RetryState};
 use setup::{run_pair, run_pair_nanoleaf, run_sync_hue};
 use web::{start_web_server, CalibrationPattern, LiveSettings, SharedState};
@@ -258,24 +258,40 @@ impl OutputFanout<'_> {
         }
 
         if self.hue_enabled {
-            let ids: Vec<u8> = self.config.zones.iter().map(|zone| zone.channel_id).collect();
+            let ids: Vec<u8> = self
+                .config
+                .zones
+                .iter()
+                .map(|zone| zone.channel_id)
+                .collect();
             let colors = if let Some(pattern) = calibration {
                 calibration_zone_colors(pattern, &self.config.zones)
-                    .into_iter().map(|(_,color)| color).collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|(_, color)| color)
+                    .collect::<Vec<_>>()
             } else {
-                HueOutput::map_field(self.field, &self.config.zones,
-                    self.settings.brightness_multiplier * self.settings.hue_output_brightness)
+                HueOutput::map_field(
+                    self.field,
+                    &self.config.zones,
+                    self.settings.brightness_multiplier * self.settings.hue_output_brightness,
+                )
             };
-            *self.shared.live_hue_colors.write().unwrap() = ids.iter().copied()
-                .zip(colors.iter().copied()).collect();
+            *self.shared.live_hue_colors.write().unwrap() =
+                ids.iter().copied().zip(colors.iter().copied()).collect();
             if self.gate.should_send("hue", &colors, adaptive) {
                 if let (Some(dtls), Some(packets)) =
-                    (self.hue_transport.as_mut(), self.hue_packets.as_mut()) {
+                    (self.hue_transport.as_mut(), self.hue_packets.as_mut())
+                {
                     let mut adapter = HueOutput {
-                        transport: dtls, packets, channel_ids: &ids,
+                        transport: dtls,
+                        packets,
+                        channel_ids: &ids,
                         use_xy: calibration.is_none() && self.settings.use_xy_gamut,
                     };
-                    match adapter.send(&LightFrame { colors: &colors, source }) {
+                    match adapter.send(&LightFrame {
+                        colors: &colors,
+                        source,
+                    }) {
                         Ok(()) => {
                             self.gate.record("hue", &colors);
                             self.hue_retry.success();
@@ -310,29 +326,45 @@ impl OutputFanout<'_> {
                 let colors = if let Some(pattern) = calibration {
                     calibration_perimeter_colors(pattern, positions.len())
                 } else {
-                    NanoleafUdpStreamer::map_field(self.field, &positions,
+                    NanoleafUdpStreamer::map_field(
+                        self.field,
+                        &positions,
                         self.settings.brightness_multiplier
-                            * self.settings.nanoleaf_output_brightness)
+                            * self.settings.nanoleaf_output_brightness,
+                    )
                 };
                 *self.shared.live_nanoleaf_colors.write().unwrap() = colors.clone();
                 if self.gate.should_send("nanoleaf", &colors, adaptive) {
                     if let Some(transport) = self.nanoleaf_transport.as_mut() {
-                        match transport.send(&LightFrame { colors: &colors, source }) {
+                        match transport.send(&LightFrame {
+                            colors: &colors,
+                            source,
+                        }) {
                             Ok(()) => {
                                 self.gate.record("nanoleaf", &colors);
                                 self.nanoleaf_retry.success();
-                                self.shared.nanoleaf_connected.store(true, Ordering::Relaxed);
+                                self.shared
+                                    .nanoleaf_connected
+                                    .store(true, Ordering::Relaxed);
                                 any_sent = true;
                             }
                             Err(error) => {
-                                self.shared.nanoleaf_connected.store(false, Ordering::Relaxed);
+                                self.shared
+                                    .nanoleaf_connected
+                                    .store(false, Ordering::Relaxed);
                                 warn!("{} output error: {error}", transport.kind());
                                 if self.nanoleaf_retry.ready() {
                                     if let Some(ncfg) = self.config.nanoleaf.as_ref() {
                                         match nanoleaf::enable_external_control(
-                                            &ncfg.ip, &ncfg.auth_token,
-                                        ).and_then(|port| {
-                                            NanoleafUdpStreamer::new(&ncfg.ip, port, layout.panel_ids())
+                                            &ncfg.ip,
+                                            &ncfg.auth_token,
+                                        )
+                                        .and_then(|port| {
+                                            NanoleafUdpStreamer::new(
+                                                &ncfg.ip,
+                                                port,
+                                                layout.panel_ids(),
+                                            )
                                         }) {
                                             Ok(new_transport) => {
                                                 *transport = new_transport;
@@ -358,12 +390,20 @@ impl OutputFanout<'_> {
                 let colors = if let Some(pattern) = calibration {
                     calibration_perimeter_colors(pattern, transport.led_count())
                 } else {
-                    WledUdpStreamer::map_field(self.field, sampler.screen_positions(),
-                        self.settings.brightness_multiplier * *trim)
+                    WledUdpStreamer::map_field(
+                        self.field,
+                        sampler.screen_positions(),
+                        self.settings.brightness_multiplier * *trim,
+                    )
                 };
                 let key = format!("wled-{index}");
-                if !self.gate.should_send(&key, &colors, adaptive) { continue; }
-                match transport.send(&LightFrame { colors: &colors, source }) {
+                if !self.gate.should_send(&key, &colors, adaptive) {
+                    continue;
+                }
+                match transport.send(&LightFrame {
+                    colors: &colors,
+                    source,
+                }) {
                     Ok(()) => {
                         self.gate.record(&key, &colors);
                         any_sent = true;
@@ -375,7 +415,9 @@ impl OutputFanout<'_> {
                 }
             }
             // A successful UDP syscall is not a physical-controller ACK.
-            self.shared.wled_last_send_ok.store(all_wled_ok, Ordering::Relaxed);
+            self.shared
+                .wled_last_send_ok
+                .store(all_wled_ok, Ordering::Relaxed);
         }
         any_sent
     }
@@ -575,9 +617,13 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         );
         let streamer = if nanoleaf_sync_enabled && pipeline_should_run {
             match nanoleaf::enable_external_control(&n_cfg.ip, &n_cfg.auth_token)
-                .and_then(|port| NanoleafUdpStreamer::new(&n_cfg.ip, port, sampler.panel_ids())) {
+                .and_then(|port| NanoleafUdpStreamer::new(&n_cfg.ip, port, sampler.panel_ids()))
+            {
                 Ok(streamer) => {
-                    info!("Nanoleaf 4D streaming ready: {} segments", streamer.panel_count());
+                    info!(
+                        "Nanoleaf 4D streaming ready: {} segments",
+                        streamer.panel_count()
+                    );
                     Some(streamer)
                 }
                 Err(error) => {
@@ -609,12 +655,21 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             match WledUdpStreamer::new(&device.ip, device.udp_port, device.led_count) {
                 Ok(transport) => {
                     let sampler = PerimeterSampler::new(
-                        device.led_count, device.start_corner, device.reverse_direction,
-                        device.perimeter_offset, config.saturation_boost,
-                        config.noise_gate_threshold, config.gamma, config.strict_blackout,
+                        device.led_count,
+                        device.start_corner,
+                        device.reverse_direction,
+                        device.perimeter_offset,
+                        config.saturation_boost,
+                        config.noise_gate_threshold,
+                        config.gamma,
+                        config.strict_blackout,
                     );
-                    info!("WLED output configured: {} LEDs -> {}", device.led_count, transport.target());
-                    wled_outputs.push((transport,sampler,device.brightness_trim));
+                    info!(
+                        "WLED output configured: {} LEDs -> {}",
+                        device.led_count,
+                        transport.target()
+                    );
+                    wled_outputs.push((transport, sampler, device.brightness_trim));
                 }
                 Err(e) => warn!("WLED output unavailable: {e}"),
             }
@@ -624,13 +679,22 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     // 3. Initialize capture
     let mut capture = create_capture(config.capture_width, config.capture_height);
     let mut color_pipeline = ColorPipeline::new(
-        config.saturation_boost, config.noise_gate_threshold, config.letterbox_detection,
+        config.saturation_boost,
+        config.noise_gate_threshold,
+        config.letterbox_detection,
     );
     color_pipeline.tune(
-        config.saturation_boost, config.noise_gate_threshold, config.gamma,
-        config.peak_weight, config.rise_smoothing_factor, config.fall_smoothing_factor,
-        config.strict_blackout, config.max_color_step, config.hdr_tone_mapping,
-        config.letterbox_detection, config.spatial_blend,
+        config.saturation_boost,
+        config.noise_gate_threshold,
+        config.gamma,
+        config.peak_weight,
+        config.rise_smoothing_factor,
+        config.fall_smoothing_factor,
+        config.strict_blackout,
+        config.max_color_step,
+        config.hdr_tone_mapping,
+        config.letterbox_detection,
+        config.spatial_blend,
     );
     let mut drm_router = DrmCaptureRouter::default();
     drm_router.set_mode(config.capture_mode);
@@ -728,7 +792,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     shared_state.set_tv_power_state(observed_tv_power);
     shared_state.set_fps(target_fps as f32);
 
-    shared_state.wled_count.store(wled_outputs.len() as u32, Ordering::Relaxed);
+    shared_state
+        .wled_count
+        .store(wled_outputs.len() as u32, Ordering::Relaxed);
     shared_state
         .hue_connected
         .store(hue_dtls.is_some(), Ordering::Relaxed);
@@ -863,9 +929,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             output_gate.clear();
             shared_state.capture_source.store(2, Ordering::Relaxed);
             for (device, _, _) in &mut wled_outputs {
-                let black = vec![RgbColor::new(0,0,0); device.led_count()];
+                let black = vec![RgbColor::new(0, 0, 0); device.led_count()];
                 let _ = device.send(&LightFrame {
-                    colors: &black, source: ColorSource::Frame,
+                    colors: &black,
+                    source: ColorSource::Frame,
                 });
             }
 
@@ -1102,11 +1169,17 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 }
             }
             color_pipeline.tune(
-                live_st.saturation_boost, live_st.noise_gate_threshold, live_st.gamma,
-                live_st.peak_weight, live_st.rise_smoothing_factor,
-                live_st.fall_smoothing_factor, live_st.strict_blackout,
-                live_st.max_color_step, live_st.hdr_tone_mapping,
-                live_st.letterbox_detection, live_st.spatial_blend,
+                live_st.saturation_boost,
+                live_st.noise_gate_threshold,
+                live_st.gamma,
+                live_st.peak_weight,
+                live_st.rise_smoothing_factor,
+                live_st.fall_smoothing_factor,
+                live_st.strict_blackout,
+                live_st.max_color_step,
+                live_st.hdr_tone_mapping,
+                live_st.letterbox_detection,
+                live_st.spatial_blend,
             );
             output_gate.clear();
             if let Some(ref mut s) = hue_sampler {
@@ -1349,17 +1422,22 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 }
             }
         }
-        if nanoleaf_active && nanoleaf_sync_enabled
-            && nanoleaf_streamer.is_none() && nanoleaf_retry.ready() {
-            if let (Some(cfg), Some(layout)) =
-                (config.nanoleaf.as_ref(), nanoleaf_sampler.as_ref()) {
+        if nanoleaf_active
+            && nanoleaf_sync_enabled
+            && nanoleaf_streamer.is_none()
+            && nanoleaf_retry.ready()
+        {
+            if let (Some(cfg), Some(layout)) = (config.nanoleaf.as_ref(), nanoleaf_sampler.as_ref())
+            {
                 match nanoleaf::enable_external_control(&cfg.ip, &cfg.auth_token)
-                    .and_then(|port| NanoleafUdpStreamer::new(
-                        &cfg.ip, port, layout.panel_ids())) {
+                    .and_then(|port| NanoleafUdpStreamer::new(&cfg.ip, port, layout.panel_ids()))
+                {
                     Ok(transport) => {
                         nanoleaf_streamer = Some(transport);
                         nanoleaf_retry.success();
-                        shared_state.nanoleaf_connected.store(true, Ordering::Relaxed);
+                        shared_state
+                            .nanoleaf_connected
+                            .store(true, Ordering::Relaxed);
                         output_gate.clear();
                     }
                     Err(err) => {
@@ -1386,31 +1464,41 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
         }
 
-
         // Source arbitration is independent of the Hue/Nanoleaf/WLED transports.
         // "SVP_CPB" requests histogram immediately; unknown responses preserve
         // an existing protected latch. The TV-specific ABI is optional.
         if last_media_check.elapsed() >= Duration::from_secs(1) {
             media_class = capture::media::query().await;
             last_media_check = tokio::time::Instant::now();
-            shared_state.playback_class.store(match media_class {
-                PlaybackClass::Unknown => 0,
-                PlaybackClass::Clear => 1,
-                PlaybackClass::Protected => 2,
-            }, Ordering::Relaxed);
+            shared_state.playback_class.store(
+                match media_class {
+                    PlaybackClass::Unknown => 0,
+                    PlaybackClass::Clear => 1,
+                    PlaybackClass::Protected => 2,
+                },
+                Ordering::Relaxed,
+            );
         }
         let route = drm_router.decide(
             media_class,
-            if histogram_capture.is_some() { HistogramHealth::Valid }
-            else { HistogramHealth::NotReady },
+            if histogram_capture.is_some() {
+                HistogramHealth::Valid
+            } else {
+                HistogramHealth::NotReady
+            },
             std::time::Instant::now(),
         );
         let needs_histogram = route.source != Source::Frame;
         if needs_histogram {
             if !using_histogram {
                 // Exclusive VT owner: drop frame capture before LG histogram init.
-                capture = Box::new(MockCapture::new(config.capture_width, config.capture_height));
-                shared_state.capture_hardware.store(false, Ordering::Relaxed);
+                capture = Box::new(MockCapture::new(
+                    config.capture_width,
+                    config.capture_height,
+                ));
+                shared_state
+                    .capture_hardware
+                    .store(false, Ordering::Relaxed);
                 using_histogram = true;
                 color_pipeline.reset();
                 output_gate.clear();
@@ -1419,7 +1507,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 info!("DRM-first source selected: LG histogram; releasing frame capture");
             }
             if histogram_capture.is_none()
-                && last_histogram_attempt.elapsed() >= Duration::from_secs(3) {
+                && last_histogram_attempt.elapsed() >= Duration::from_secs(3)
+            {
                 last_histogram_attempt = tokio::time::Instant::now();
                 match HistogramCapture::try_new() {
                     Ok(driver) => {
@@ -1449,7 +1538,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         None
                     }
                 }
-            } else { None };
+            } else {
+                None
+            };
             if let Some(field) = processed_field {
                 last_histogram_valid = Some(std::time::Instant::now());
                 histogram_black_sent = false;
@@ -1457,14 +1548,18 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 let settings = shared_state.current_settings.read().unwrap().clone();
                 let mut fanout = OutputFanout {
                     field: &field,
-                    config: &config, settings: &settings, shared: &shared_state,
+                    config: &config,
+                    settings: &settings,
+                    shared: &shared_state,
                     wled: &mut wled_outputs,
-                    hue_transport: &mut hue_dtls, hue_packets: &mut hue_packet_builder,
+                    hue_transport: &mut hue_dtls,
+                    hue_packets: &mut hue_packet_builder,
                     nanoleaf_transport: &mut nanoleaf_streamer,
                     nanoleaf_layout: &nanoleaf_sampler,
                     hue_enabled: hue_active && hue_sync_enabled,
                     nanoleaf_enabled: nanoleaf_active && nanoleaf_sync_enabled,
-                    hue_retry: &mut hue_retry, nanoleaf_retry: &mut nanoleaf_retry,
+                    hue_retry: &mut hue_retry,
+                    nanoleaf_retry: &mut nanoleaf_retry,
                     gate: &mut output_gate,
                 };
                 emitted_light_update = fanout.publish();
@@ -1472,32 +1567,39 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 shared_state.capture_source.store(2, Ordering::Relaxed);
                 // Fail closed, not by sending the synthetic MockCapture's colours.
                 // Hold last real colour for <=500ms, then explicitly send black.
-                let expired = last_histogram_valid
-                    .is_none_or(|t| t.elapsed() > Duration::from_millis(500));
+                let expired =
+                    last_histogram_valid.is_none_or(|t| t.elapsed() > Duration::from_millis(500));
                 if expired && !histogram_black_sent {
                     histogram_black_sent = true;
                     output_gate.clear();
                     for (device, _, _) in &mut wled_outputs {
-                        let black = vec![RgbColor::new(0,0,0);device.led_count()];
+                        let black = vec![RgbColor::new(0, 0, 0); device.led_count()];
                         let _ = device.send(&LightFrame {
-                            colors: &black, source: ColorSource::Histogram,
+                            colors: &black,
+                            source: ColorSource::Histogram,
                         });
                     }
                     if let Some(ref mut nl) = nanoleaf_streamer {
-                        let black = vec![RgbColor::new(0,0,0);nl.panel_count()];
+                        let black = vec![RgbColor::new(0, 0, 0); nl.panel_count()];
                         let _ = nl.send(&LightFrame {
-                            colors: &black, source: ColorSource::Histogram,
+                            colors: &black,
+                            source: ColorSource::Histogram,
                         });
                     }
                     if let (Some(ref mut dtls), Some(ref mut packets)) =
-                        (&mut hue_dtls, &mut hue_packet_builder) {
-                        let ids: Vec<u8> = config.zones.iter().map(|z|z.channel_id).collect();
-                        let black = vec![RgbColor::new(0,0,0);ids.len()];
+                        (&mut hue_dtls, &mut hue_packet_builder)
+                    {
+                        let ids: Vec<u8> = config.zones.iter().map(|z| z.channel_id).collect();
+                        let black = vec![RgbColor::new(0, 0, 0); ids.len()];
                         let mut output = HueOutput {
-                            transport: dtls, packets, channel_ids: &ids, use_xy: false,
+                            transport: dtls,
+                            packets,
+                            channel_ids: &ids,
+                            use_xy: false,
                         };
                         let _ = output.send(&LightFrame {
-                            colors: &black, source: ColorSource::Histogram,
+                            colors: &black,
+                            source: ColorSource::Histogram,
                         });
                     }
                 }
@@ -1507,9 +1609,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
             let update_elapsed = light_update_window.elapsed();
             if update_elapsed >= Duration::from_secs(1) {
-                shared_state.set_light_update_fps(
-                    light_update_count as f32 / update_elapsed.as_secs_f32(),
-                );
+                shared_state
+                    .set_light_update_fps(light_update_count as f32 / update_elapsed.as_secs_f32());
                 light_update_count = 0;
                 light_update_window = tokio::time::Instant::now();
             }
@@ -1528,7 +1629,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             histogram_black_sent = false;
             last_histogram_valid = None;
             capture = create_capture(config.capture_width, config.capture_height);
-            shared_state.capture_hardware.store(capture.is_real_hardware(), Ordering::Relaxed);
+            shared_state
+                .capture_hardware
+                .store(capture.is_real_hardware(), Ordering::Relaxed);
             capture_retry.success();
             capture_recovery = CaptureRecovery::default();
             info!("Unprotected media stable; returned to normal frame capture");
@@ -1561,14 +1664,15 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 // Processing is independent of which outputs are enabled.
                 // A synthetic MockCapture is never published to real lights.
                 if hardware_frame {
-                    match color_pipeline.frame(
-                        frame.data, frame.width, frame.height, frame.is_bgra,
-                    ) {
+                    match color_pipeline.frame(frame.data, frame.width, frame.height, frame.is_bgra)
+                    {
                         Ok(field) => {
                             let settings = shared_state.current_settings.read().unwrap().clone();
                             let mut fanout = OutputFanout {
                                 field: &field,
-                                config: &config, settings: &settings, shared: &shared_state,
+                                config: &config,
+                                settings: &settings,
+                                shared: &shared_state,
                                 wled: &mut wled_outputs,
                                 hue_transport: &mut hue_dtls,
                                 hue_packets: &mut hue_packet_builder,
@@ -1576,7 +1680,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                                 nanoleaf_layout: &nanoleaf_sampler,
                                 hue_enabled: hue_active && hue_sync_enabled,
                                 nanoleaf_enabled: nanoleaf_active && nanoleaf_sync_enabled,
-                                hue_retry: &mut hue_retry, nanoleaf_retry: &mut nanoleaf_retry,
+                                hue_retry: &mut hue_retry,
+                                nanoleaf_retry: &mut nanoleaf_retry,
                                 gate: &mut output_gate,
                             };
                             emitted_light_update = fanout.publish();

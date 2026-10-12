@@ -508,10 +508,14 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
         wled_last_send_ok: shared.wled_last_send_ok.load(Ordering::Relaxed),
         capture_hardware: shared.capture_hardware.load(Ordering::Relaxed),
         capture_source: match shared.capture_source.load(Ordering::Relaxed) {
-            1 => "histogram", 2 => "histogram-waiting", _ => "frame",
+            1 => "histogram",
+            2 => "histogram-waiting",
+            _ => "frame",
         },
         playback_class: match shared.playback_class.load(Ordering::Relaxed) {
-            1 => "clear", 2 => "protected", _ => "unknown",
+            1 => "clear",
+            2 => "protected",
+            _ => "unknown",
         },
         capture_resolution: shared.capture_resolution.read().unwrap().clone(),
         settings: shared.current_settings.read().unwrap().clone(),
