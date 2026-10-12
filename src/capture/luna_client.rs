@@ -76,7 +76,7 @@ mod tests {
         let mut command = Command::new("sh");
         command.args([
             "-c",
-            "printf '\\n{\\\"returnValue\\\":true,\\\"modelName\\\":\\\"OLED42C5PSA.AAUQLJD\\\"}\\n'; read unused",
+            r#"printf '%s\n' '{"returnValue":true,"modelName":"OLED42C5PSA.AAUQLJD"}'; read unused"#,
         ]);
         let parsed = read_interactive_reply(&mut command, Duration::from_secs(2), 4096)
             .await
@@ -89,7 +89,7 @@ mod tests {
         let mut command = Command::new("sh");
         command.args([
             "-c",
-            "printf '['; printf '{\\\"resource\\\":[{\\\"resource\\\":\\\"HDMI_INPUT\\\"}]}' ; printf ']'; read unused",
+            r#"printf '['; printf '%s' '{"resource":[{"resource":"HDMI_INPUT"}]}'; printf ']'; read unused"#,
         ]);
         let parsed = read_interactive_reply(&mut command, Duration::from_secs(2), 4096)
             .await
@@ -109,7 +109,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_reply_is_rejected() {
         let mut command = Command::new("sh");
-        command.args(["-c", "printf '{\\\"large\\\":\\\"01234567890123456789\\\"}'; read unused"]);
+        command.args(["-c", r#"printf '%s' '{"large":"01234567890123456789"}'; read unused"#]);
         assert!(read_interactive_reply(&mut command, Duration::from_secs(2), 12)
             .await
             .is_none());
