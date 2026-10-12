@@ -212,6 +212,71 @@ disassembly of the two vendor libraries may identify the **actual**
 `LSRegister` arguments. Keep the proprietary binaries out of Git and
 do not assume that a coincidental string establishes a caller relationship.
 
+## Verified running C5 capture services (2026-10-12)
+
+The owner's read-only `ls-monitor -l` output now shows the native
+system capture process `/usr/sbin/captureservice` registering:
+
+- `com.webos.service.capture` (dynamic service)
+- `com.webos.service.capturepermission` (dynamic service)
+- `com.webos.service.capture.client3002` (client-only)
+- `com.webos.rm.client._fT43KOib6U5FNp` (Resource Manager client)
+
+Resource Manager clients belonging to `extinput-integration`, `tvrm`
+and `starfish-media-pipeline` are registered separately.
+
+`ls-monitor -i com.webos.service.capturepermission` shows
+`checkPermission` and `setPermission` with `provides` including
+`private`, `all`, and `capturepermission.security`. This is an
+**access-control group descriptor**, not proof the histogram probe is
+authorized. **Do not invoke `setPermission` for this investigation.**
+
+`ls-monitor -i com.webos.service.capture` shows
+`getCapability`, `getProperties`, `getOptions`, `isLocked`,
+`createHandle`, `execute`, `lock`, `unlock` and other methods
+under access controls including `capture.client`. Their existence
+proves registration, **not** successful standalone client registration
+or a supported HDCP histogram backend.
+
+The owner's search of a few role directories for three exact strings
+produced no filename matches. This does not establish absence: older
+static roles may live in `/usr/share/ls2/roles/pub/` or `prv/`, names
+may be granted through terminal `*` wildcards, and a service might
+have a distinct client executable identity.
+
+### Narrow, read-only role provenance query
+
+```sh
+ssh root@192.168.8.184 'sh -s' <<'TV'
+echo '===== static role directory layout ====='
+for root in /usr/share/ls2/roles /var/palm/ls2/roles \
+            /usr/share/luna-service2/roles.d \
+            /var/luna-service2/roles.d /var/luna-service2-dev/roles.d; do
+  [ -d "$root" ] || continue
+  find "$root" -maxdepth 2 -type d -print
+done
+echo '===== files mentioning native capture identities ====='
+for root in /usr/share/ls2/roles /var/palm/ls2/roles \
+            /usr/share/luna-service2/roles.d \
+            /var/luna-service2/roles.d /var/luna-service2-dev/roles.d; do
+  [ -d "$root" ] || continue
+  grep -RIlE --include='*.json' \
+    'com[.]webos[.]service[.]capture|capturepermission|capture[.]client|hue_sync_service|captureservice' \
+    "$root" 2>/dev/null | head -50 || true
+done
+echo '===== system capture service executable ====='
+ls -l /usr/sbin/captureservice
+echo '===== probe binary not to execute ====='
+ls -l /var/home/root/c5-histogram-probe
+TV
+```
+
+Only filenames are collected from role matching, not confidential role
+contents. This is safer than calling `checkPermission` with unverified
+schema or trying to override policy. Preserve `Unknown` for HDMI
+protection and do **not** rerun the native probe until the registration
+name and policy path are understood.
+
 ## Build and download
 
 GitHub Actions on the `feature/vendor-neutral-wled-drm-first` branch runs
