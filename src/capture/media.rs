@@ -5,7 +5,7 @@
 use super::drm_routing::PlaybackClass;
 use serde_json::Value;
 use std::time::Duration;
-use tokio::process::Command;
+use crate::capture::luna_client;
 
 pub fn classify(value: &Value) -> PlaybackClass {
     let Some(pipelines) = value.as_array() else {
@@ -55,37 +55,17 @@ pub fn classify(value: &Value) -> PlaybackClass {
 }
 
 pub async fn query() -> PlaybackClass {
-    let mut command = Command::new("luna-send");
-    // -f requests a JSON reply; -w bounds waiting for a Luna response.
-    // An empty stdout (even if luna-send exits 0) is NOT a clear session.
-    command.args([
-        "-n",
-        "1",
-        "-f",
-        "-w",
-        "850",
+    // LG C5 returns empty stdout from luna-send -n 1 even when exit=0;
+    // interactive -i with stdin kept open returns the actual JSON array.
+    let Some(reply) = luna_client::request(
         "luna://com.webos.media/getActivePipelines",
         "{}",
-    ]);
-    command.kill_on_drop(true);
-    let Ok(Ok(output)) = tokio::time::timeout(Duration::from_millis(1100), command.output()).await
-    else {
+        Duration::from_millis(2300),
+        128 * 1024,
+    ).await else {
         return PlaybackClass::Unknown;
     };
-    if !output.status.success() || output.stdout.len() > 128 * 1024 {
-        return PlaybackClass::Unknown;
-    }
-    let Ok(raw) = std::str::from_utf8(&output.stdout) else {
-        return PlaybackClass::Unknown;
-    };
-    // luna-send may prepend an informational prefix before the JSON array.
-    let Some(start) = raw.find('[') else {
-        return PlaybackClass::Unknown;
-    };
-    let Ok(value) = serde_json::from_str::<Value>(raw[start..].trim()) else {
-        return PlaybackClass::Unknown;
-    };
-    classify(&value)
+    classify(&reply)
 }
 
 const MODEL_URI: &str = "luna://com.webos.service.tv.systemproperty/getSystemInfo";
@@ -110,25 +90,13 @@ pub fn parse_model_reply(raw: &str) -> Option<String> {
 
 /// Read-only system-property query, guarded against hung Luna services.
 pub async fn query_tv_model() -> Option<String> {
-    let mut command = Command::new("luna-send");
-    command.args([
-        "-n",
-        "1",
-        "-f",
-        "-w",
-        "1400",
+    let reply = luna_client::request(
         MODEL_URI,
         r#"{"keys":["modelName"]}"#,
-    ]);
-    command.kill_on_drop(true);
-    let output = tokio::time::timeout(Duration::from_millis(1700), command.output())
-        .await
-        .ok()?
-        .ok()?;
-    if !output.status.success() || output.stdout.len() > 8192 {
-        return None;
-    }
-    parse_model_reply(std::str::from_utf8(&output.stdout).ok()?)
+        Duration::from_millis(2300),
+        8192,
+    ).await?;
+    parse_model_reply(&reply.to_string())
 }
 
 #[cfg(test)]
@@ -153,6 +121,22 @@ mod tests {
             parse_model_reply(r#"{"returnValue":true,"modelName":"INVALID/TV"}"#),
             None
         );
+    }
+    #[test]
+    fn exact_c5_model_and_hdmi_pipeline_fixture() {
+        assert_eq!(
+            parse_model_reply(r#"{"returnValue":true,"modelName":"OLED42C5PSA.AAUQLJD","sdkVersion":"10.0.0"}"#),
+            Some("OLED42C5PSA.AAUQLJD".to_string())
+        );
+        let hdmi = json!([
+            {"is_foreground":false, "type":"vtclient", "resource":[]},
+            {"is_foreground":true, "type":"avconnector", "resource":[{"resource":"MAIN_SCALER"}]},
+            {"is_foreground":true, "type":"tv", "currentAppId":"com.webos.app.hdmi1",
+             "resource":[{"resource":"HDMI_INPUT"},{"resource":"VHDMIRX"},{"resource":"AHDMIRX"},
+                         {"resource":"ADEC"},{"resource":"ADEC_BANDWIDTH"}]}
+        ]);
+        // HDMI routing is not evidence that the HDMI source lacks HDCP.
+        assert_eq!(classify(&hdmi), PlaybackClass::Unknown);
     }
     #[test]
     fn valid_clear_requires_foreground_media_decoder() {

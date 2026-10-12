@@ -1,6 +1,7 @@
 pub mod dile_vt;
 pub mod drm_routing;
 pub mod histogram;
+pub mod luna_client;
 pub mod media;
 pub mod vtcapture;
 

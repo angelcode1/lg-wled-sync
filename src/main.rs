@@ -701,6 +701,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut histogram_capture: Option<HistogramCapture> = None;
     let mut using_histogram = false;
     let mut media_class = PlaybackClass::Unknown;
+    // Long-lived Luna requests must not stall 30–60 FPS LED output. Poll
+    // results in background tasks, without detaching uncontrolled processes.
+    let mut media_query: Option<tokio::task::JoinHandle<PlaybackClass>> = None;
+    let mut model_query: Option<tokio::task::JoinHandle<Option<String>>> = None;
     let mut tv_model: Option<String> = None;
     let mut last_model_check = tokio::time::Instant::now() - Duration::from_secs(31);
     let mut last_model_warning = tokio::time::Instant::now() - Duration::from_secs(61);
@@ -1463,26 +1467,28 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
         }
 
-        // The measured C5 spatial profile must match this physical TV's
-        // modelName. Luna failures keep the model unknown and prevent unsafe
-        // cross-model spatial mapping. Poll infrequently (30 seconds).
-        if last_model_check.elapsed() >= Duration::from_secs(30) {
-            last_model_check = tokio::time::Instant::now();
-            tv_model = capture::media::query_tv_model().await;
+        // Query Luna's PRIVATE bus in interactive mode. On C5 the -n 1
+        // shortcut exits successfully but emits no response. Run requests
+        // in bounded background tasks so a missing service cannot freeze
+        // the capture/lighting cadence.
+        if model_query.as_ref().is_some_and(|task| task.is_finished()) {
+            let completed = model_query.take().expect("checked above");
+            tv_model = completed.await.ok().flatten();
             if !config.histogram.matches_tv_model(tv_model.as_deref())
                 && last_model_warning.elapsed() >= Duration::from_secs(60)
             {
-                warn!("Custom/G4 histogram profile not valid for TV model {:?}; refusing spatial mapping", tv_model);
+                warn!("C5 histogram spatial profile not valid for TV model {:?}; refusing spatial mapping", tv_model);
                 last_model_warning = tokio::time::Instant::now();
             }
         }
+        if model_query.is_none() && last_model_check.elapsed() >= Duration::from_secs(30) {
+            last_model_check = tokio::time::Instant::now();
+            model_query = Some(tokio::spawn(capture::media::query_tv_model()));
+        }
 
-        // Source arbitration is independent of the Hue/Nanoleaf/WLED transports.
-        // "SVP_CPB" requests histogram immediately; unknown responses preserve
-        // an existing protected latch. The TV-specific ABI is optional.
-        if last_media_check.elapsed() >= Duration::from_secs(1) {
-            media_class = capture::media::query().await;
-            last_media_check = tokio::time::Instant::now();
+        if media_query.as_ref().is_some_and(|task| task.is_finished()) {
+            let completed = media_query.take().expect("checked above");
+            media_class = completed.await.unwrap_or(PlaybackClass::Unknown);
             shared_state.playback_class.store(
                 match media_class {
                     PlaybackClass::Unknown => 0,
@@ -1491,6 +1497,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 },
                 Ordering::Relaxed,
             );
+        }
+        if media_query.is_none() && last_media_check.elapsed() >= Duration::from_secs(1) {
+            last_media_check = tokio::time::Instant::now();
+            media_query = Some(tokio::spawn(capture::media::query()));
         }
         let route = drm_router.decide(
             media_class,
