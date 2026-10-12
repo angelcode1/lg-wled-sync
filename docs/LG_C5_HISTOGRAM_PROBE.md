@@ -277,6 +277,60 @@ schema or trying to override policy. Preserve `Unknown` for HDMI
 protection and do **not** rerun the native probe until the registration
 name and policy path are understood.
 
+## 2026-10-13: standard role search returned no hits
+
+The owner enumerated the following populated/available directory paths
+on the C5: `/usr/share/ls2/roles/{pub,prv}`,
+`/var/palm/ls2/roles/{pub,prv}`,
+`/usr/share/luna-service2/roles.d`,
+`/var/luna-service2/roles.d`, and
+`/var/luna-service2-dev/roles.d`. Searching their
+`*.json` file contents for literal `com.webos.service.capture`,
+`capturepermission`, `captureservice`, and
+`hue_sync_service` returned **no matching filenames**.
+
+**Do not infer missing permissions from this.** The search did not count
+files or inspect other suffixes and directories; roles can refer to
+wildcard identities or be installed as manifests elsewhere. The LS2
+documentation identifies the older `pub/prv` layout but the OEM TV
+may have additional security data.
+
+The next probe is deliberately *read-only* and bounded:
+
+```sh
+ssh root@192.168.8.184 'sh -s' <<'TV'
+echo '===== role file inventory ====='
+for dir in /usr/share/ls2/roles/prv /usr/share/ls2/roles/pub \
+  /var/palm/ls2/roles/prv /var/palm/ls2/roles/pub \
+  /usr/share/luna-service2/roles.d \
+  /var/luna-service2/roles.d /var/luna-service2-dev/roles.d; do
+  [ -d "$dir" ] || continue
+  echo "--- $dir ---"
+  printf 'regular_file_count='
+  find "$dir" -maxdepth 1 -type f | wc -l
+  find "$dir" -maxdepth 1 -type f | head -12
+done
+echo '===== capture-related filenames across known LS2 roots ====='
+find /usr/share/ls2 /var/palm/ls2 /usr/share/luna-service2 \
+  /var/luna-service2 /var/luna-service2-dev -type f \
+  \( -iname '*capture*' -o -iname '*resource*' \
+     -o -iname '*hue*' \) -print 2>/dev/null | head -65
+
+echo '===== possible security log reader ====='
+command -v journalctl || true
+command -v logread || true
+ls -ld /var/log/journal /run/log/journal 2>/dev/null || true
+TV
+```
+
+If system logs are available, examine only narrow entries around the
+first test at local `2026-10-12 21:41`, targeting `ls-hubd`,
+`LSHUB` or `LSRegister`. Do not restart system services,
+modify LS2 roles, call `setPermission` or attempt to force capture
+of protected streams. No further histogram init is justified until
+we can identify the failed registration or other native initialization
+preconditions.
+
 ## Build and download
 
 GitHub Actions on the `feature/vendor-neutral-wled-drm-first` branch runs
@@ -294,7 +348,13 @@ gh run download RUN_ID --repo angelcode1/lg-wled-sync \
 file ~/Downloads/c5-histogram-bin/lg-hue-sync
 ```
 
-## TV preflight and explicit hardware test
+## Historical TV probe procedure — do not rerun until Luna failure resolved
+
+The commands below document the first hardware experiment. On this C5,
+that experiment failed during LS2 registration and left a stale marker.
+Do **not** run it again merely because a newer binary is available.
+
+### TV preflight and explicit hardware test (historical)
 
 First confirm that no other capture owner is running; do not kill
 TV media pipelines, `ls-hubd`, or `extinput-integration`.
