@@ -22,6 +22,7 @@ Use the built-in HyperDRM 0.13.0 calibration wizard from the user-supplied Hyper
     ssh root@$TV_IP "luna-send -n 1 luna://com.webos.applicationManager/launch '{\"id\":\"org.webosbrew.histogramhyperion\",\"params\":{\"action\":\"calibrate\"}}'"
 
 Install HyperDRM 0.13.0 and elevate its own service through Homebrew before starting if it is not present.
+HyperDRM's Start and calibration wizard also require a reachable Hyperion or HyperHDR JSON TCP receiver (normally port 19444) configured in HyperDRM's Receiver tab. WLED alone does not implement that JSON service; use an existing receiver or run a temporary receiver on your PC for the calibration session. The same receiver is needed for visual LED validation.
 Stop any competing lg-wled-sync, lg-hue-sync or PicCap capture before starting.
 
 Use the TV remote to open HyperDRM > Calibration > Start Auto Calibration. The wizard
