@@ -111,6 +111,56 @@ MAC
 `pipelineId` error establishes part of the request schema, not which
 HDMI protection status is available in any response.
 
+## 2026-10-12: live foreground HDMI pipeline still rejected
+
+The owner queried `getActivePipelines` immediately before the three
+HDMI service methods. The unique foreground `type:tv` pipeline with
+`HDMI_INPUT` was `_LmPGCWxmsfNTjV`. Requests containing this exact
+`{"pipelineId":"_LmPGCWxmsfNTjV"}` produced:
+
+- `getSignalState`: `{"returnValue":false,"pipelineId":"_LmPGCWxmsfNTjV"}`
+- `getHDMIInfo`: same false reply
+- `getHDMIDiagnosticsInfo`: same false reply
+
+This proves only that the JSON payload passes required-field validation
+and the endpoint responds. The supplied Resource Manager pipeline ID
+may not be an opened extinputs service-specific pipeline context, or
+additional conditions may be required. **Do not assume the IDs are
+equivalent, and do not call `open`, `close`, `switchExternalInput`,
+setters or diagnostic self-test methods just to probe the interface.**
+
+No active HDCP authentication bit was exposed in these results. The
+EIM `HDMI1.signal=TRUE` and `5v=TRUE` booleans remain connection/signal
+indicators, not proof of a protected or unprotected link.
+
+### Safe offline binary symbol/string inspection
+
+To look for request parameter schemas in the locally installed
+`/usr/sbin/extinput-integration` without executing any additional
+service methods, copy that existing vendor executable to the Mac:
+
+```bash
+ssh root@192.168.8.184 'ls -lh /usr/sbin/extinput-integration'
+ssh root@192.168.8.184 'cat /usr/sbin/extinput-integration' \
+  > ~/Downloads/c5-extinput-integration.bin
+file ~/Downloads/c5-extinput-integration.bin
+# Homebrew binutils has a keg-only prefix on macOS:
+GSTRINGS="$(brew --prefix binutils)/bin/gstrings"
+"$GSTRINGS" -a ~/Downloads/c5-extinput-integration.bin \
+  | grep -iE -C 2 'getHDMIInfo|getSignalState|getHDMIDiagnosticsInfo|hdcp|authenticat|pipelineId' \
+  | head -240 > ~/Downloads/c5-hdmi-symbol-hints.txt
+cat ~/Downloads/c5-hdmi-symbol-hints.txt
+```
+
+These are **untrusted symbol hints, not reverse-engineered API
+contracts**. Keep the proprietary vendor binary local; do not commit or
+share it publicly. The grep output may include unrelated logging or
+sensitive strings, so inspect it before sharing.
+
+This inspection can inform a later carefully scoped query; it is
+independent of the direct LG `vtCapture_*Histogram` test that remains
+the higher-priority Ambilight milestone.
+
 ## Current engineering policy
 
 Do not infer an HDMI session is clear solely because `SVP_CPB` is absent.
