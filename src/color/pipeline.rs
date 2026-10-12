@@ -13,6 +13,12 @@ pub const GRID_WIDTH: usize = 32;
 pub const GRID_HEIGHT: usize = 18;
 const CELLS: usize = GRID_WIDTH * GRID_HEIGHT;
 
+struct RawCell {
+    mean: RgbColor,
+    peak: RgbColor,
+    max_luma: f32,
+}
+
 #[derive(Debug, Clone)]
 pub struct ColorField {
     pub source: ColorSource,
@@ -146,6 +152,9 @@ impl ColorPipeline {
         for y in 0..GRID_HEIGHT {
             for x in 0..GRID_WIDTH {
                 let mut total = [0u32; 3];
+                let mut peak = RgbColor::new(0, 0, 0);
+                let mut peak_score = -1.0f32;
+                let mut max_luma = 0.0f32;
                 for iy in 0..3 {
                     for ix in 0..3 {
                         let gx = (x as f32 + (ix as f32 + 0.5) / 3.0) / GRID_WIDTH as f32;
@@ -155,16 +164,32 @@ impl ColorPipeline {
                         let px = ((sx.clamp(0.0, 1.0) * (w - 1) as f32) as usize).min(w - 1);
                         let py = ((sy.clamp(0.0, 1.0) * (h - 1) as f32) as usize).min(h - 1);
                         let idx = (py * w + px) * 4;
-                        total[0] += data[idx + if bgra { 2 } else { 0 }] as u32;
-                        total[1] += data[idx + 1] as u32;
-                        total[2] += data[idx + if bgra { 0 } else { 2 }] as u32;
+                        let sample = RgbColor::new(
+                            data[idx + if bgra { 2 } else { 0 }],
+                            data[idx + 1],
+                            data[idx + if bgra { 0 } else { 2 }],
+                        );
+                        total[0] += u32::from(sample.r);
+                        total[1] += u32::from(sample.g);
+                        total[2] += u32::from(sample.b);
+                        let luma = sample.luminance();
+                        let chroma = sample.saturation();
+                        let score = luma * (1.0 + chroma * chroma);
+                        if score > peak_score {
+                            peak = sample;
+                            peak_score = score;
+                        }
+                        max_luma = max_luma.max(luma);
                     }
                 }
-                cells.push(RgbColor::new(
-                    (total[0] / 9) as u8,
-                    (total[1] / 9) as u8,
-                    (total[2] / 9) as u8,
-                ));
+                cells.push(RawCell {
+                    mean: RgbColor::new(
+                        (total[0] / 9) as u8,
+                        (total[1] / 9) as u8,
+                        (total[2] / 9) as u8,
+                    ),
+                    peak, max_luma,
+                });
             }
         }
         Ok(self.process(cells, ColorSource::Frame))
@@ -194,10 +219,12 @@ impl ColorPipeline {
         }
         let samples = profile.map_leds(regions, &positions)?;
         if samples.len() != CELLS { bail!("histogram profile did not produce full colour grid"); }
-        Ok(self.process(samples, ColorSource::Histogram))
+        Ok(self.process(samples.into_iter().map(|mean| RawCell {
+            peak: mean, max_luma: mean.luminance(), mean,
+        }).collect(), ColorSource::Histogram))
     }
 
-    fn process(&mut self, raw: Vec<RgbColor>, source: ColorSource) -> ColorField {
+    fn process(&mut self, raw: Vec<RawCell>, source: ColorSource) -> ColorField {
         debug_assert_eq!(raw.len(), CELLS);
         let now = Instant::now();
         let source_changed = self.last_source != Some(source);
@@ -212,10 +239,10 @@ impl ColorPipeline {
         self.last_source = Some(source);
 
         let mut sum = [0u64; 3];
-        for c in &raw {
-            sum[0] += c.r as u64;
-            sum[1] += c.g as u64;
-            sum[2] += c.b as u64;
+        for cell in &raw {
+            sum[0] += cell.mean.r as u64;
+            sum[1] += cell.mean.g as u64;
+            sum[2] += cell.mean.b as u64;
         }
         let global = RgbColor::new(
             (sum[0] / CELLS as u64) as u8,
@@ -227,13 +254,19 @@ impl ColorPipeline {
         self.last_global = Some(global);
 
         let mut out = Vec::with_capacity(CELLS);
-        for (i, c) in raw.into_iter().enumerate() {
-            let mean = FloatColor::new(c.r as f32, c.g as f32, c.b as f32);
+        for (i, cell) in raw.into_iter().enumerate() {
+            let mean = FloatColor::new(
+                cell.mean.r as f32, cell.mean.g as f32, cell.mean.b as f32,
+            );
+            let peak = FloatColor::new(
+                cell.peak.r as f32, cell.peak.g as f32, cell.peak.b as f32,
+            );
             // A newly selected source starts from its real first sample,
             // not black or stale colours from the previous backend.
             let previous = if source_changed { mean } else { self.smoothed[i] };
-            let result = self.processor.process(mean, mean, mean.luminance(),
-                previous, scene_cut, elapsed);
+            let result = self.processor.process(
+                mean, peak, cell.max_luma, previous, scene_cut, elapsed,
+            );
             self.smoothed[i] = result;
             out.push(result.to_rgb());
         }
