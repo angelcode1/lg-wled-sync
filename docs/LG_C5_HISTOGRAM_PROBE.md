@@ -137,6 +137,81 @@ on the TV and can be recopied read-only. Use a dedicated local directory
 so downloaded LG binaries are not confused with cross-build artifacts.
 Keep vendor binaries local; share selected `gstrings` output instead.
 
+## 2026-10-12: native strings identify LS2 identities and separate policy layers
+
+Read-only extraction of the **on-device C5** 32-bit vendor libraries by the
+owner found the following *literal strings* (not yet verified registration
+requests or dynamic policy state):
+
+**`libvtcapture.so.1.0.0`**
+- `LSRegister`; `com.webos.service.capture.client`
+- `com.webos.service.capturepermission`
+- `Permission::registerPermissionSubscribe`,
+  `Permission::processCheckPermission`, `checkPermission`, `whitelist`
+- `Client not found on the whitelist.`
+- `your process has no permissions!! [%s]`
+- `LIB_CAPTURE_REFUSED_PERMISSION_DENIED`
+- `LIB_CAPTURE_REFUSED_WATCHING_SCRAMBLED`
+- `LIB_CAPTURE_REFUSED_WATCHING_SECURE_VIDEO`
+- `hue_sync_service`
+- `force capture allow.` (diagnostic text only; not an instruction)
+- `ResourceManagerClient` and `VtDriver::initVtCapture`
+
+**`libresource_mgr_client.so.1.0.0`**
+- `com.webos.rm.client.`
+- `ResourceManagerClientInit`, `ums.resource_mgr_client`,
+  `com.webos.media`
+
+These strongly motivate checking the executable-specific Luna role and the
+native client's *actual* service name, but **do not establish** that
+`com.webos.service.capture.client` is the exact name that failed registration
+or that `hue_sync_service` is a usable entitlement. There may be
+independent failures at bus registration, the capture permission whitelist,
+resource-manager allocation and DRM/security policy.
+
+**Important:** the native capture library explicitly reports refusal of
+secure and scrambled video. This evidence leaves DRM-protected HDMI support
+**unverified**; do not claim histogram access to protected Prime Video or
+try to disable the refusal conditions.
+
+The on-TV `vt_devmode` file was confirmed stale and removed by the owner
+after checking for competing capture processes (`STALE_MARKER_CLEARED`).
+
+### Read-only LS2 and static role discovery
+
+```bash
+ssh root@192.168.8.184 'sh -s' <<'TV'
+echo '===== registered capture services ====='
+ls-monitor -l | grep -Ei 'capture|capturepermission|webos.rm.client' || true
+
+echo '===== capture permission API registration ====='
+ls-monitor -i com.webos.service.capturepermission 2>&1 || true
+
+echo '===== capture API registration ====='
+ls-monitor -i com.webos.service.capture 2>&1 || true
+
+echo '===== Luna security directories ====='
+for d in /usr/share/luna-service2 /usr/share/luna-service2-dev \
+         /etc/luna-service2 /var/luna-service2 /var/luna-service2-dev; do
+  [ -d "$d" ] && ls -ld "$d" "$d"/roles.d "$d"/manifests.d 2>/dev/null || true
+done
+
+echo '===== only exact capture-related role text matches ====='
+for d in /usr/share/luna-service2/roles.d /usr/share/luna-service2-dev/roles.d \
+         /etc/luna-service2/roles.d /var/luna-service2/roles.d \
+         /var/luna-service2-dev/roles.d; do
+  [ -d "$d" ] || continue
+  grep -lE 'com\\.webos\\.service\\.capture\\.client|com\\.webos\\.service\\.capturepermission|hue_sync_service' \
+    "$d"/*.json 2>/dev/null || true
+done
+TV
+```
+
+For reverse-engineering the failure origin, a local, private ELF
+disassembly of the two vendor libraries may identify the **actual**
+`LSRegister` arguments. Keep the proprietary binaries out of Git and
+do not assume that a coincidental string establishes a caller relationship.
+
 ## Build and download
 
 GitHub Actions on the `feature/vendor-neutral-wled-drm-first` branch runs
