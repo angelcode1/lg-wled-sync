@@ -93,7 +93,8 @@ jobs:
           file "$BIN"
           file "$BIN" | grep -Eq 'ELF 32-bit.*ARM'
           readelf -h "$BIN"
-          readelf -W --dyn-syms "$BIN" | grep -Eq '[[:space:]]printLog
+          readelf -W --dyn-syms "$BIN" | grep -Fq 'printLog'
+          readelf -W --version-info "$BIN" > "$RUNNER_TEMP/required-glibc.txt"
           python3 - <<'PY'
           import os
           import pathlib
