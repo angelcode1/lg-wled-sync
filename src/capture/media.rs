@@ -78,10 +78,48 @@ pub async fn query() -> PlaybackClass {
     classify(&value)
 }
 
+
+const MODEL_URI: &str = "luna://com.webos.service.tv.systemproperty/getSystemInfo";
+
+pub fn parse_model_reply(raw: &str) -> Option<String> {
+    let start = raw.find('{')?;
+    let object: Value = serde_json::from_str(raw[start..].trim()).ok()?;
+    if object.get("returnValue").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let model = object.get("modelName")?.as_str()?;
+    if model.is_empty() || model.len() > 63
+        || !model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ')) {
+        return None;
+    }
+    Some(model.to_string())
+}
+
+/// Read-only system-property query, guarded against hung Luna services.
+pub async fn query_tv_model() -> Option<String> {
+    let mut command = Command::new("luna-send");
+    command.args(["-n", "1", MODEL_URI, r#"{"keys":["modelName"]}"#]);
+    command.kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_millis(850), command.output())
+        .await.ok()?.ok()?;
+    if !output.status.success() || output.stdout.len() > 8192 {
+        return None;
+    }
+    parse_model_reply(std::str::from_utf8(&output.stdout).ok()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn model_reply_must_be_exact_and_successful() {
+        assert_eq!(parse_model_reply(r#"{"returnValue":true,"modelName":"OLED65C5PSA"}"#),
+            Some("OLED65C5PSA".to_string()));
+        assert_eq!(parse_model_reply("info\n{\"returnValue\":false,\"modelName\":\"OLED65C5PSA\"}"), None);
+        assert_eq!(parse_model_reply(r#"{"returnValue":true,"modelName":"OLED65C5PSA"} trailing"#), None);
+        assert_eq!(parse_model_reply(r#"{"returnValue":true,"modelName":"INVALID/TV"}"#), None);
+    }
     #[test]
     fn valid_clear_requires_foreground_media_decoder() {
         assert_eq!(

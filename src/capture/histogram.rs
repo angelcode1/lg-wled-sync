@@ -257,20 +257,62 @@ pub struct RimPoint {
 #[serde(default)]
 pub struct HistogramSettings {
     pub profile: Profile,
+    /// The exact modelName measured by the calibration wizard.
+    /// Custom mappings without a model identity are rejected.
+    pub model: Option<String>,
     pub points: Vec<RimPoint>,
 }
 impl Default for HistogramSettings {
     fn default() -> Self {
         Self {
             profile: Profile::Average,
+            model: None,
             points: Vec::new(),
         }
     }
 }
+fn valid_model_name(model: &str) -> bool {
+    !model.is_empty()
+        && model.len() <= 63
+        && model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' '))
+}
+
 impl HistogramSettings {
+    /// Source-specific spatial maps are not interchangeable across TVs.
+    /// A missing model from Luna is not evidence of a match.
+    pub fn matches_tv_model(&self, current: Option<&str>) -> bool {
+        match self.profile {
+            Profile::Average => true,
+            Profile::Custom => self.model.as_deref().zip(current)
+                .is_some_and(|(expected, actual)| expected == actual),
+            Profile::G4 => current.is_some_and(|m| {
+                let bytes = m.as_bytes();
+                bytes.len() >= 8 && bytes.starts_with(b"OLED")
+                    && bytes[4].is_ascii_digit() && bytes[5].is_ascii_digit()
+                    && bytes[6] == b'G' && bytes[7] == b'4'
+            }),
+        }
+    }
+
     pub fn validate(&self) -> bool {
-        if self.profile == Profile::Custom && !(2..=16).contains(&self.points.len()) {
-            return false;
+        if self.profile == Profile::Custom {
+            if !(4..=16).contains(&self.points.len()) {
+                return false;
+            }
+            let Some(model) = self.model.as_deref() else {
+                return false;
+            };
+            if !valid_model_name(model) {
+                return false;
+            }
+            // Reject partially mapped rims; a complete wizard measurement
+            // provides at least one calibrated point per screen edge.
+            let edges: std::collections::BTreeSet<u8> = self.points.iter()
+                .map(|p| p.position.floor() as u8)
+                .collect();
+            if edges != [0, 1, 2, 3].into_iter().collect() {
+                return false;
+            }
         }
         self.points.len() <= 16
             && self.points.iter().enumerate().all(|(i, p)| {
@@ -358,6 +400,32 @@ impl HistogramSettings {
 mod tests {
     use super::*;
     #[test]
+    fn spatial_mapping_requires_exact_tv_model_and_four_edges() {
+        let points = [0.25, 1.25, 2.25, 3.25].into_iter().enumerate()
+            .map(|(i, position)| RimPoint { position, region: i as u8 })
+            .collect();
+        let cfg = HistogramSettings {
+            profile: Profile::Custom,
+            model: Some("OLED65C5PSA".to_string()),
+            points,
+        };
+        assert!(cfg.validate());
+        assert!(cfg.matches_tv_model(Some("OLED65C5PSA")));
+        assert!(!cfg.matches_tv_model(Some("OLED55C5PSA")));
+        assert!(!cfg.matches_tv_model(None));
+        let mut different = cfg.clone();
+        different.model = None;
+        assert!(!different.validate());
+        different.model = Some("OLED65C5PSA".to_string());
+        different.points.pop();
+        assert!(!different.validate());
+        let g4 = HistogramSettings { profile: Profile::G4, ..Default::default() };
+        assert!(!g4.matches_tv_model(Some("OLED65C5PSA")));
+        assert!(g4.matches_tv_model(Some("OLED65G4PSA")));
+        assert!(HistogramSettings::default().matches_tv_model(None));
+    }
+
+    #[test]
     fn source_abi_size_and_weighted_means() {
         assert_eq!(std::mem::size_of::<NativeHistogram>(), 0x604);
         let mut r = NativeHistogram::default();
@@ -381,6 +449,7 @@ mod tests {
         assert_eq!(output, vec![RgbColor::new(10, 0, 0); 2]);
         let broken = HistogramSettings {
             profile: Profile::Custom,
+            model: Some("OLED65C5PSA".to_string()),
             points: vec![],
         };
         assert!(broken.map_leds(&samples, &[]).is_err());

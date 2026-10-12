@@ -701,6 +701,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut histogram_capture: Option<HistogramCapture> = None;
     let mut using_histogram = false;
     let mut media_class = PlaybackClass::Unknown;
+    let mut tv_model: Option<String> = None;
+    let mut last_model_check = tokio::time::Instant::now() - Duration::from_secs(31);
+    let mut last_model_warning = tokio::time::Instant::now() - Duration::from_secs(61);
     let mut last_media_check = tokio::time::Instant::now() - Duration::from_secs(2);
     let mut last_histogram_attempt = tokio::time::Instant::now() - Duration::from_secs(10);
     let mut last_histogram_valid: Option<std::time::Instant> = None;
@@ -1460,6 +1463,20 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
         }
 
+        // The measured C5 spatial profile must match this physical TV's
+        // modelName. Luna failures keep the model unknown and prevent unsafe
+        // cross-model spatial mapping. Poll infrequently (30 seconds).
+        if last_model_check.elapsed() >= Duration::from_secs(30) {
+            last_model_check = tokio::time::Instant::now();
+            tv_model = capture::media::query_tv_model().await;
+            if !config.histogram.matches_tv_model(tv_model.as_deref())
+                && last_model_warning.elapsed() >= Duration::from_secs(60)
+            {
+                warn!("Custom/G4 histogram profile not valid for TV model {:?}; refusing spatial mapping", tv_model);
+                last_model_warning = tokio::time::Instant::now();
+            }
+        }
+
         // Source arbitration is independent of the Hue/Nanoleaf/WLED transports.
         // "SVP_CPB" requests histogram immediately; unknown responses preserve
         // an existing protected latch. The TV-specific ABI is optional.
@@ -1527,12 +1544,17 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
 
             let processed_field = if let Some(regions) = new_colors {
-                match color_pipeline.histogram(&regions, &config.histogram) {
+                if !config.histogram.matches_tv_model(tv_model.as_deref()) {
+                    // No inferred spatial map or vendor-specific colour path.
+                    None
+                } else {
+                    match color_pipeline.histogram(&regions, &config.histogram) {
                     Ok(field) => Some(field),
                     Err(error) => {
                         warn!("Rejected invalid histogram colour field: {error:#}");
                         None
                     }
+                }
                 }
             } else {
                 None
