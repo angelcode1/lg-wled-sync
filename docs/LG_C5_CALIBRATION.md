@@ -54,3 +54,12 @@ A measured spatial histogram profile is NOT an HDR/SDR colour LUT, a white-point
 measurement, or proof that DRM histograms work on C5. The C5 native ABI and protected
 playback path still require on-device validation. Avoid running multiple VT owners.
 Exact tested helper scripts are distributed in lg-c5-histogram-profile.zip in the conversation.
+## Source-level test evidence (not a C5 TV test)
+
+On a Linux build host, the provided HyperDRM 0.13.0 source passed:
+
+- node tests/calibration.test.js (patch fitting, missing/global regions)
+- gcc -Wall -Wextra -Werror -O2 native/test_histogram.c -o test-histogram && ./test-histogram
+- gcc -Wall -Wextra -Werror -O2 native/test_playback.c -ldl -o test-playback && ./test-playback
+
+These do not validate our Rust fork or the C5's native device behaviour.
