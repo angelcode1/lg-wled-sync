@@ -91,11 +91,12 @@ jobs:
           file "$BIN"
           file "$BIN" | grep -Eq 'ELF 32-bit.*ARM'
           readelf -h "$BIN"
-          readelf -W --version-info "$BIN" > target/required-glibc.txt
+          readelf -W --version-info "$BIN" > "$RUNNER_TEMP/required-glibc.txt"
           python3 - <<'PY'
+          import os
           import pathlib
           import re
-          text = pathlib.Path('target/required-glibc.txt').read_text()
+          text = (pathlib.Path(os.environ['RUNNER_TEMP']) / 'required-glibc.txt').read_text()
           required = {tuple(map(int, version.split('.')))
                       for version in re.findall(r'GLIBC_([0-9]+\.[0-9]+(?:\.[0-9]+)?)', text)}
           if not required:

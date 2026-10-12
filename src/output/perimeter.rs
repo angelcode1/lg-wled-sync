@@ -70,6 +70,7 @@ pub struct PerimeterSampler {
     last: Option<Instant>,
 }
 impl PerimeterSampler {
+    #[allow(clippy::too_many_arguments)] // legacy sampler constructor; superseded by shared field
     pub fn new(
         count: usize,
         corner: StartCorner,

@@ -821,8 +821,6 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
     };
 
-    let mut current_hue_brightness = config.brightness_multiplier * config.hue_output_brightness;
-    let mut current_use_xy = config.use_xy_gamut;
     let mut auto_tv_power = config.auto_tv_power;
 
     let mut output_gate = OutputGate::default();
@@ -1113,8 +1111,6 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 observed_tv_power = None;
                 last_tv_power_poll = tokio::time::Instant::now() - Duration::from_secs(2);
             }
-            current_hue_brightness = live_st.brightness_multiplier * live_st.hue_output_brightness;
-            current_use_xy = live_st.use_xy_gamut;
             *shared_state.hue_zones.write().unwrap() = config.zones.clone();
             if hue_sync_enabled != live_st.hue_sync_enabled {
                 hue_sync_enabled = live_st.hue_sync_enabled;
@@ -1217,11 +1213,11 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
             info!(
                 "Applied live settings: Hue={:.1}x, Nanoleaf={:.1}x, saturation={:.1}x, smoothing={:.2}, xy_mode={}",
-                current_hue_brightness,
+                live_st.brightness_multiplier * live_st.hue_output_brightness,
                 live_st.brightness_multiplier * live_st.nanoleaf_output_brightness,
                 live_st.saturation_boost,
                 live_st.smoothing_factor,
-                current_use_xy
+                live_st.use_xy_gamut
             );
         }
 

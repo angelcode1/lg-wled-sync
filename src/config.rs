@@ -173,7 +173,7 @@ pub struct WledConfig {
     pub brightness_trim: f32,
 }
 fn default_wled_port() -> u16 {
-    21324
+    crate::output::wled::DEFAULT_PORT
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

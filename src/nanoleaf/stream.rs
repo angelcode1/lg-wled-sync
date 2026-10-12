@@ -61,6 +61,7 @@ impl NanoleafUdpStreamer {
         self.panel_ids.len()
     }
 
+    #[allow(dead_code)] // retained for existing transport consumers
     pub fn panel_ids(&self) -> &[u16] {
         &self.panel_ids
     }
@@ -113,6 +114,7 @@ pub struct PerimeterZone {
 }
 
 /// Computes sampling coordinates and smooths colors around the TV border for Nanoleaf 4D lightstrip
+#[allow(dead_code)] // legacy sampler retained for alignment/UI tests
 pub struct NanoleafPerimeterSampler {
     base_zones: Vec<PerimeterZone>,
     zones: Vec<PerimeterZone>,
@@ -474,6 +476,7 @@ impl NanoleafPerimeterSampler {
         self.processor.set_spatial_blend(strength);
     }
 
+    #[allow(dead_code)] // shared pipeline owns active smoothing
     pub fn set_smoothing_factor(&mut self, factor: f32) {
         self.processor.set_smoothing(factor);
     }
@@ -515,11 +518,13 @@ impl NanoleafPerimeterSampler {
     }
 
     /// Sets the active illuminated screen area to compensate for widescreen black letterbox bars.
+    #[allow(dead_code)] // legacy raw-frame capture path
     pub fn set_active_rect(&mut self, rect: ActiveRect) {
         self.active_rect = Some(rect);
     }
 
     /// Samples colors for all perimeter zones from the downscaled frame buffer.
+    #[allow(dead_code)] // legacy sampler; no longer called by run_daemon
     pub fn sample_frame(
         &mut self,
         frame_data: &[u8],
