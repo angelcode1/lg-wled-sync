@@ -87,7 +87,6 @@ pub struct ColorPipeline {
     last_source: Option<ColorSource>,
     last_sample: Option<Instant>,
     last_global: Option<RgbColor>,
-    frame_number: u64,
     letterbox: bool,
     spatial_blend: f32,
 }
@@ -100,7 +99,6 @@ impl ColorPipeline {
             last_source: None,
             last_sample: None,
             last_global: None,
-            frame_number: 0,
             letterbox,
             spatial_blend: 0.0,
         }
@@ -138,7 +136,6 @@ impl ColorPipeline {
                 .is_none_or(|needed| data.len() < needed) {
             bail!("invalid decoded frame dimensions or buffer length");
         }
-        self.frame_number = self.frame_number.saturating_add(1);
         // Recompute once per captured frame, rather than independently for
         // each vendor. Capture dimensions are already bounded by Config.
         let rect = if self.letterbox {
