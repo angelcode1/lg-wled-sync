@@ -257,6 +257,9 @@ pub struct SharedState {
     pub nanoleaf_ip: RwLock<String>,
     pub hue_connected: AtomicBool,
     pub nanoleaf_connected: AtomicBool,
+    /// Successful UDP syscall, not an acknowledgement from WLED.
+    pub wled_last_send_ok: AtomicBool,
+    pub wled_count: AtomicU32,
     pub capture_hardware: AtomicBool,
     /// 0 = unknown, 1 = active, 2 = standby/off.
     pub tv_power_state: AtomicU32,
@@ -287,6 +290,8 @@ impl SharedState {
             nanoleaf_ip: RwLock::new(nanoleaf_ip),
             hue_connected: AtomicBool::new(false),
             nanoleaf_connected: AtomicBool::new(false),
+            wled_last_send_ok: AtomicBool::new(false),
+            wled_count: AtomicU32::new(0),
             capture_hardware: AtomicBool::new(false),
             tv_power_state: AtomicU32::new(0),
             capture_resolution: RwLock::new(capture_res),
@@ -373,6 +378,8 @@ struct StatusResponse {
     hue_bridge_ip: String,
     nanoleaf_connected: bool,
     nanoleaf_ip: String,
+    wled_outputs: u32,
+    wled_last_send_ok: bool,
     capture_hardware: bool,
     capture_resolution: String,
     settings: LiveSettings,
@@ -436,6 +443,7 @@ pub async fn start_web_server(
         .route("/index.html", get(root))
         .route("/capture-patterns", get(capture_patterns))
         .route("/api/status", get(status))
+        .route("/api/outputs", get(outputs))
         .route("/api/start", post(start))
         .route("/api/stop", post(stop))
         .route("/api/toggle", post(toggle))
@@ -488,6 +496,8 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
         hue_bridge_ip: shared.hue_bridge_ip.clone(),
         nanoleaf_connected: shared.nanoleaf_connected.load(Ordering::Relaxed),
         nanoleaf_ip: shared.nanoleaf_ip.read().unwrap().clone(),
+        wled_outputs: shared.wled_count.load(Ordering::Relaxed),
+        wled_last_send_ok: shared.wled_last_send_ok.load(Ordering::Relaxed),
         capture_hardware: shared.capture_hardware.load(Ordering::Relaxed),
         capture_resolution: shared.capture_resolution.read().unwrap().clone(),
         settings: shared.current_settings.read().unwrap().clone(),
@@ -500,6 +510,21 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
             .unwrap()
             .map(CalibrationPattern::name),
     })
+}
+
+/// Vendor-neutral, read-only output discovery for dashboard and integrations.
+/// "last_send_ok" is a local UDP send result, NOT receiver connectivity.
+async fn outputs(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let shared = &state.shared;
+    Json(serde_json::json!({
+        "version": 1,
+        "outputs": [
+            {"type":"wled", "instances":shared.wled_count.load(Ordering::Relaxed),
+             "last_send_ok":shared.wled_last_send_ok.load(Ordering::Relaxed)},
+            {"type":"hue", "active":shared.hue_connected.load(Ordering::Relaxed)},
+            {"type":"nanoleaf", "active":shared.nanoleaf_connected.load(Ordering::Relaxed)}
+        ]
+    }))
 }
 
 async fn start(State(state): State<AppState>) -> Result<Json<StatusMessage>, ApiError> {

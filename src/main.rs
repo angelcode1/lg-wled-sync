@@ -4,6 +4,7 @@ mod config;
 mod hue;
 mod local_http;
 mod nanoleaf;
+mod output;
 mod runtime;
 mod setup;
 mod tv_power;
@@ -29,6 +30,9 @@ use color::{RgbColor, ZoneSampler};
 use config::{Config, ConfigError};
 use hue::{sync_entertainment_areas, HueDtlsClient, HueStreamPacketBuilder};
 use nanoleaf::{NanoleafPerimeterSampler, NanoleafUdpStreamer};
+use output::{ColorSource, HueOutput, LightFrame, LightOutput};
+use output::perimeter::PerimeterSampler;
+use output::wled::WledUdpStreamer;
 use runtime::{PendingCommands, PipelineState, RetryState};
 use setup::{run_pair, run_pair_nanoleaf, run_sync_hue};
 use web::{start_web_server, CalibrationPattern, LiveSettings, SharedState};
@@ -467,6 +471,26 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         sampler.set_max_color_step(config.max_color_step);
     }
 
+    // Native WLED adapter: config owns physical LED geometry and output
+    // transport. Hue/Nanoleaf credentials are entirely optional.
+    let mut wled_outputs = Vec::new();
+    if config.wled_sync_enabled {
+        for device in config.wled_devices.iter().filter(|d| d.enabled) {
+            match WledUdpStreamer::new(&device.ip, device.udp_port, device.led_count) {
+                Ok(transport) => {
+                    let sampler = PerimeterSampler::new(
+                        device.led_count, device.start_corner, device.reverse_direction,
+                        device.perimeter_offset, config.saturation_boost,
+                        config.noise_gate_threshold, config.gamma, config.strict_blackout,
+                    );
+                    info!("WLED output configured: {} LEDs -> {}", device.led_count, transport.target());
+                    wled_outputs.push((transport,sampler,device.brightness_trim));
+                }
+                Err(e) => warn!("WLED output unavailable: {e}"),
+            }
+        }
+    }
+
     // 3. Initialize capture
     let mut capture = create_capture(config.capture_width, config.capture_height);
 
@@ -556,6 +580,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     shared_state.set_tv_power_state(observed_tv_power);
     shared_state.set_fps(target_fps as f32);
 
+    shared_state.wled_count.store(wled_outputs.len() as u32, Ordering::Relaxed);
     shared_state
         .hue_connected
         .store(hue_dtls.is_some(), Ordering::Relaxed);
@@ -1277,13 +1302,20 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         };
 
                         if should_send {
-                            let packet = if calibration.is_none() && current_use_xy {
-                                builder.build_xy_packet(&channels)
-                            } else {
-                                builder.build_rgb_packet(&channels)
+                            let ids: Vec<u8> = sampled_zones.iter().map(|(id, _)| *id).collect();
+                            let colors: Vec<RgbColor> = sampled_zones.iter()
+                                .map(|(_, color)| if calibration.is_some() {
+                                    *color
+                                } else {
+                                    color.scale(current_hue_brightness)
+                                }).collect();
+                            let mut device = HueOutput {
+                                transport: dtls, packets: builder,
+                                channel_ids: &ids, use_xy: calibration.is_none() && current_use_xy,
                             };
-
-                            if let Err(e) = dtls.send(&packet) {
+                            if let Err(e) = device.send(&LightFrame {
+                                colors: &colors, source: ColorSource::Frame,
+                            }) {
                                 shared_state.hue_connected.store(false, Ordering::Relaxed);
                                 error!("Failed to send DTLS HueStream packet: {}", e);
                                 if hue_retry.ready() {
@@ -1340,7 +1372,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                             || last_nanoleaf_heartbeat.elapsed() >= Duration::from_millis(500);
                         if should_send {
                             last_nanoleaf_heartbeat = tokio::time::Instant::now();
-                            if let Err(e) = nl_streamer.send_frame(&nl_colors, 0) {
+                            if let Err(e) = nl_streamer.send(&LightFrame {
+                                colors: &nl_colors, source: ColorSource::Frame,
+                            }) {
                                 shared_state
                                     .nanoleaf_connected
                                     .store(false, Ordering::Relaxed);
@@ -1396,6 +1430,33 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                                     .store(true, Ordering::Relaxed);
                                 last_nanoleaf_colors = nl_colors;
                                 emitted_light_update = true;
+                            }
+                        }
+                    }
+                }
+
+                // WLED-only operation is independent from Hue and Nanoleaf.
+                // MockCapture is deliberately not sent to physical LEDs.
+                if hardware_frame && config.wled_sync_enabled {
+                    for (device, sampler, trim) in &mut wled_outputs {
+                        if let Some(mut colors) = sampler.sample_frame(
+                            frame.data, frame.width, frame.height, frame.is_bgra,
+                            config.letterbox_detection,
+                        ) {
+                            let brightness = config.brightness_multiplier * *trim;
+                            for color in &mut colors { *color = color.scale(brightness); }
+                            let result = device.send(&LightFrame {
+                                colors: &colors, source: ColorSource::Frame,
+                            });
+                            match result {
+                                Ok(()) => {
+                                    shared_state.wled_last_send_ok.store(true, Ordering::Relaxed);
+                                    emitted_light_update = true;
+                                }
+                                Err(e) => {
+                                    shared_state.wled_last_send_ok.store(false, Ordering::Relaxed);
+                                    warn!("WLED UDP send failed (delivery not acknowledged): {e}");
+                                }
                             }
                         }
                     }

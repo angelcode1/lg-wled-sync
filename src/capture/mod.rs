@@ -1,4 +1,5 @@
 pub mod dile_vt;
+pub mod drm_routing;
 pub mod vtcapture;
 
 use std::time::{Duration, Instant};
