@@ -1986,7 +1986,10 @@ async fn run_test_histogram(
             }
             Err(error) => {
                 failed_samples += 1;
-                warn!("HISTOGRAM_SAMPLE {}/{} unavailable: {error:#}", sample_id, samples);
+                warn!(
+                    "HISTOGRAM_SAMPLE {}/{} unavailable: {error:#}",
+                    sample_id, samples
+                );
             }
         }
         if sample_id != samples {
