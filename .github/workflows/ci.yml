@@ -28,12 +28,11 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Install native host build dependencies
+      - name: Verify preinstalled Ubuntu host prerequisites
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev cmake perl clang \
-            python3 nodejs file binutils git
+          for tool in cc make perl cmake pkg-config python3 node git; do
+            command -v "$tool"
+          done
       - name: Install stable Rust with formatter and linter
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -73,12 +72,11 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Install host tools required by the cross-build
+      - name: Verify preinstalled cross-build host tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            make file binutils python3 ca-certificates
-          command -v docker
+          for tool in docker make file readelf python3; do
+            command -v "$tool"
+          done
           docker info
       - name: Build 32-bit ARMv7 binary using Debian Buster toolchain
         run: make build
