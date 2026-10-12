@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "feature/vendor-neutral-wled-drm-first"]
     tags: ["v*"]
   pull_request:
-    branches: [main]
+    branches: [main, "feature/vendor-neutral-wled-drm-first"]
   workflow_dispatch:
 
 permissions:
