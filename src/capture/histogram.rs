@@ -172,14 +172,15 @@ pub struct HistogramCapture {
 
 // LG initialization needs its developer marker. A guardian child uses only
 // async-signal-safe libc operations after fork, and removes only the marker we
-// created, matched by device/inode. Existing markers remain untouched.
+// created, matched by device/inode. If the marker already exists, fail closed:
+// it might belong to another process OR be stale after a native abort.
 // Do not create this guardian while another thread is concurrently forking.
 struct MarkerGuard {
     writer: i32,
     pid: libc::pid_t,
 }
 impl MarkerGuard {
-    fn begin() -> Result<Option<Self>> {
+    fn begin() -> Result<Self> {
         use std::io::ErrorKind;
         let result = OpenOptions::new()
             .write(true)
@@ -188,7 +189,11 @@ impl MarkerGuard {
             .open(MARKER);
         let file = match result {
             Ok(file) => file,
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => return Ok(None),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                bail!(
+                    "LG developer marker already exists at {MARKER}; refusing native capture.                      Check for active VT owners and inspect the marker before manual cleanup"
+                );
+            }
             Err(error) => return Err(error).context("cannot create temporary LG developer marker"),
         };
         let metadata = file.metadata()?;
@@ -206,8 +211,14 @@ impl MarkerGuard {
         let pid = unsafe { libc::fork() };
         if pid == 0 {
             // Child: never call Rust allocators or logging in a multithreaded
-            // process after fork. Close/write/wait/lstat/unlink/_exit only.
+            // process after fork. Detach from the SSH process group so closing
+            // a PTY after a native crash does not necessarily kill cleanup.
+            // This is best-effort; cgroup kills and kernel failures still
+            // require manual marker inspection.
             unsafe {
+                if libc::setsid() < 0 {
+                    libc::_exit(1);
+                }
                 libc::close(fds[1]);
                 let mut waiter = libc::pollfd {
                     fd: fds[0],
@@ -243,10 +254,10 @@ impl MarkerGuard {
             let _ = fs::remove_file(MARKER);
             bail!("LG marker guardian fork failed");
         }
-        Ok(Some(Self {
+        Ok(Self {
             writer: fds[1],
             pid,
-        }))
+        })
     }
     fn finish(&mut self) -> Result<()> {
         if self.writer >= 0 {
@@ -307,15 +318,13 @@ impl HistogramCapture {
             // Always clean up the temporary developer marker, even when a
             // native C++ exception is returned as a Rust error.
             let init_result = guarded_init(init);
-            if let Some(guard) = marker.as_mut() {
-                if let Err(error) = guard.finish() {
-                    if let Ok(handle) = init_result.as_ref() {
-                        if !handle.is_null() {
-                            let _ = guarded_finish(finish, *handle);
-                        }
+            if let Err(error) = marker.finish() {
+                if let Ok(handle) = init_result.as_ref() {
+                    if !handle.is_null() {
+                        let _ = guarded_finish(finish, *handle);
                     }
-                    return Err(error);
                 }
+                return Err(error);
             }
             let handle = init_result?;
             if handle.is_null() {
