@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use capture::drm_routing::{CaptureMode, DrmCaptureRouter, HistogramHealth, PlaybackClass, Source};
+use capture::drm_routing::{DrmCaptureRouter, HistogramHealth, PlaybackClass, Source};
 use capture::histogram::HistogramCapture;
 use output::perimeter::Point;
 use capture::{
@@ -727,6 +727,17 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             );
             shared_state.is_syncing.store(false, Ordering::SeqCst);
             pipeline_state = PipelineState::Paused;
+            // Release the LG histogram owner even while waiting in the
+            // paused-management loop; never leave VT resources pinned.
+            histogram_capture = None;
+            using_histogram = false;
+            shared_state.capture_source.store(2, Ordering::Relaxed);
+            for (device, _, _) in &mut wled_outputs {
+                let black = vec![RgbColor::new(0,0,0); device.led_count()];
+                let _ = device.send(&LightFrame {
+                    colors: &black, source: ColorSource::Frame,
+                });
+            }
 
             // Deactivate Hue stream on bridge if web requested stop
             if (web_stop_requested || (auto_tv_power && observed_tv_power == Some(false)))
@@ -1345,6 +1356,17 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         });
                     }
                 }
+            }
+            if emitted_light_update {
+                light_update_count = light_update_count.saturating_add(1);
+            }
+            let update_elapsed = light_update_window.elapsed();
+            if update_elapsed >= Duration::from_secs(1) {
+                shared_state.set_light_update_fps(
+                    light_update_count as f32 / update_elapsed.as_secs_f32(),
+                );
+                light_update_count = 0;
+                light_update_window = tokio::time::Instant::now();
             }
             if !runtime::wait_for_capture_retry(frame_interval, &shutdown).await {
                 break 'sync_loop;

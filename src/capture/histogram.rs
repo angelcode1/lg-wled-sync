@@ -4,7 +4,7 @@
 //! This does not access decrypted pixels; each sample has 16 region histograms.
 use crate::color::RgbColor;
 use crate::output::perimeter::Point;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use libloading::Library;
 use serde::{Deserialize, Serialize};
 use std::ffi::{c_void, CString};
