@@ -393,6 +393,87 @@ The C5's system capture service has separately registered successfully,
 but that does **not** prove it permits a new native capture client.
 Preserve capture-denial and secure-video refusal behaviour.
 
+## 2026-10-13: actual C5 native LS2 capture manifest and role content
+
+The owner supplied `c5-ls2-capture-policy.txt` copied read-only from
+the TV. This **confirms**, rather than infers, the installed policy:
+
+- `screen-capture-webos.manifest.json` has `id:
+  "screen-capture-webos"`. Its `roleFiles` are
+  `com.webos.service.capture.role.json` **and**
+  `com.webos.service.capture.testsuite.role.json`. It also references
+  the `com.webos.service.capture.service` service file,
+  `com.webos.service.capture.api.json`,
+  `com.webos.service.capture.perm.json` and
+  `com.webos.service.capture.groups.json`.
+- Capture system role: **`exeName: /usr/sbin/captureservice`**,
+  `type: regular`, `allowedNames:`
+  `com.webos.service.capture`,
+  `com.webos.service.capture.client*`,
+  `com.webos.rm.client.*`,
+  `com.webos.service.capturepermission`. Service-specific outbound
+  destinations include `com.webos.media` for Resource Manager clients.
+- Client permission file maps
+  `com.webos.service.capture`,
+  `com.webos.service.capture.client*` and
+  `com.webos.service.capturepermission` to `["all"]`.
+  **Do not copy this broad system-service ACG assignment to our
+  standalone executable.**
+- API permission file groups
+  `capturepermission.security` for `checkPermission` and
+  `setPermission`, and `capture.client` for
+  `createHandle`, `execute`, `getCapability` and related
+  capture APIs. Both groups are flagged `public:false`.
+- Service file maps the dynamic
+  `com.webos.service.capture` and
+  `com.webos.service.capturepermission` names to
+  `Exec=/usr/sbin/captureservice`.
+
+The owner's actual histogram binary is
+`/var/home/root/c5-histogram-probe`, which **does not match** that
+system role's `exeName`. This is strong evidence for a separate
+**native caller registration role** being necessary; it is not yet
+proof that this is the sole cause of
+`std::runtime_error("LSRegisterPubPriv FAILED")`.
+
+In particular, a native library registration could require a
+service-specific client name distinct from the primary executable
+and an independent `ResourceManagerClient` registration.
+Role matching, ACG method permission and capture-content restrictions
+are separate decisions. A successful call to private Luna from root
+`luna-send` does not test the application binary's role.
+
+The manifest names a second `testsuite` role that was **not in the
+original upload**. That and the older
+`/usr/share/ls2/roles/prv/avcaptureinf-test.json` may explain how
+LG registers a *different executable* for capture diagnostics.
+Inspect them **read-only**, before designing any package manifest:
+
+```sh
+ssh root@192.168.8.184 'sh -s' <<'TV'
+for f in \
+  /usr/share/luna-service2/roles.d/com.webos.service.capture.testsuite.role.json \
+  /usr/share/ls2/roles/prv/avcaptureinf-test.json \
+  /usr/share/ls2/roles/pub/avcaptureinf-test.json \
+  /usr/share/luna-service2/manifests.d/avcaptureinf.manifest.json; do
+  echo
+  echo "===== $f ====="
+  if [ -f "$f" ]; then
+    ls -l "$f"
+    cat "$f"
+  else
+    echo NOT_FOUND
+  fi
+done
+TV
+```
+
+This read-only test does not initialise VT capture, call
+`setPermission`, or modify LG-owned security config. The
+`vt_devmode` marker has already been cleared after the failed probe;
+do not recreate it for a permissions experiment. Do not assume that
+approving a caller for Luna makes protected HDMI histograms available.
+
 ## Build and download
 
 GitHub Actions on the `feature/vendor-neutral-wled-drm-first` branch runs
