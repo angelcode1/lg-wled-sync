@@ -22,6 +22,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
+use capture::drm_routing::{CaptureMode, DrmCaptureRouter, HistogramHealth, PlaybackClass, Source};
+use capture::histogram::HistogramCapture;
+use output::perimeter::Point;
 use capture::{
     create_capture, detect_source_fps, CaptureRecovery, MockCapture, RecoveryAction, ScreenCapture,
     VtCapture,
@@ -493,6 +496,15 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
     // 3. Initialize capture
     let mut capture = create_capture(config.capture_width, config.capture_height);
+    let mut drm_router = DrmCaptureRouter::default();
+    drm_router.set_mode(config.capture_mode);
+    let mut histogram_capture: Option<HistogramCapture> = None;
+    let mut using_histogram = false;
+    let mut media_class = PlaybackClass::Unknown;
+    let mut last_media_check = tokio::time::Instant::now() - Duration::from_secs(2);
+    let mut last_histogram_attempt = tokio::time::Instant::now() - Duration::from_secs(10);
+    let mut last_histogram_valid: Option<std::time::Instant> = None;
+    let mut histogram_black_sent = false;
 
     // Determine target framerate (supports auto-matching source refresh rate 23.976..60.0 Hz)
     let detected_fps = if config.fps == 0 {
@@ -1153,6 +1165,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 continue 'sync_loop;
             }
             capture_faulted = false;
+            histogram_capture = None;
+            using_histogram = false;
             capture_recovery = CaptureRecovery::default();
             capture_retry.success();
             capture = create_capture(config.capture_width, config.capture_height);
@@ -1162,6 +1176,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
 
         if pipeline_state == PipelineState::Paused {
+            histogram_capture = None;
             continue 'sync_loop;
         }
 
@@ -1180,6 +1195,176 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 }
             }
         }
+
+
+        // Source arbitration is independent of the Hue/Nanoleaf/WLED transports.
+        // "SVP_CPB" requests histogram immediately; unknown responses preserve
+        // an existing protected latch. The TV-specific ABI is optional.
+        if last_media_check.elapsed() >= Duration::from_secs(1) {
+            media_class = capture::media::query().await;
+            last_media_check = tokio::time::Instant::now();
+            shared_state.playback_class.store(match media_class {
+                PlaybackClass::Unknown => 0,
+                PlaybackClass::Clear => 1,
+                PlaybackClass::Protected => 2,
+            }, Ordering::Relaxed);
+        }
+        let route = drm_router.decide(
+            media_class,
+            if histogram_capture.is_some() { HistogramHealth::Valid }
+            else { HistogramHealth::NotReady },
+            std::time::Instant::now(),
+        );
+        let needs_histogram = route.source != Source::Frame;
+        if needs_histogram {
+            if !using_histogram {
+                // Exclusive VT owner: drop frame capture before LG histogram init.
+                capture = Box::new(MockCapture::new(config.capture_width, config.capture_height));
+                shared_state.capture_hardware.store(false, Ordering::Relaxed);
+                using_histogram = true;
+                histogram_black_sent = false;
+                last_histogram_valid = None;
+                info!("DRM-first source selected: LG histogram; releasing frame capture");
+            }
+            if histogram_capture.is_none()
+                && last_histogram_attempt.elapsed() >= Duration::from_secs(3) {
+                last_histogram_attempt = tokio::time::Instant::now();
+                match HistogramCapture::try_new() {
+                    Ok(driver) => {
+                        histogram_capture = Some(driver);
+                        info!("LG histogram initialized, awaiting populated measurements");
+                    }
+                    Err(err) => warn!("LG histogram unavailable: {err:#}"),
+                }
+            }
+            let mut new_colors = None;
+            if let Some(driver) = histogram_capture.as_mut() {
+                match driver.sample() {
+                    Ok(colors) => new_colors = Some(colors),
+                    Err(err) => {
+                        warn!("LG histogram read interrupted: {err:#}");
+                        histogram_capture = None;
+                        last_histogram_attempt = tokio::time::Instant::now();
+                    }
+                }
+            }
+
+            if let Some(regions) = new_colors {
+                last_histogram_valid = Some(std::time::Instant::now());
+                histogram_black_sent = false;
+                shared_state.capture_source.store(1, Ordering::Relaxed);
+                if config.wled_sync_enabled {
+                    for (device, sampler, trim) in &mut wled_outputs {
+                        match config.histogram.map_leds(&regions, sampler.screen_positions()) {
+                            Ok(mut colors) => {
+                                let gain = config.brightness_multiplier * *trim;
+                                for c in &mut colors { *c = c.scale(gain); }
+                                match device.send(&LightFrame {
+                                    colors: &colors, source: ColorSource::Histogram,
+                                }) {
+                                    Ok(()) => {
+                                        shared_state.wled_last_send_ok.store(true, Ordering::Relaxed);
+                                        emitted_light_update = true;
+                                    }
+                                    Err(err) => {
+                                        shared_state.wled_last_send_ok.store(false, Ordering::Relaxed);
+                                        warn!("WLED histogram output failed: {err}");
+                                    }
+                                }
+                            }
+                            Err(err) => warn!("WLED histogram mapping invalid: {err}"),
+                        }
+                    }
+                }
+                if hue_active && hue_sync_enabled {
+                    if let (Some(ref mut dtls), Some(ref mut packets)) =
+                        (&mut hue_dtls, &mut hue_packet_builder) {
+                        let points: Vec<Point> = config.zones.iter().map(|z| Point {
+                            x: (z.x_min + z.x_max)*0.5,
+                            y: (z.y_min + z.y_max)*0.5,
+                        }).collect();
+                        if let Ok(mut colors) = config.histogram.map_leds(&regions, &points) {
+                            for c in &mut colors {
+                                *c = c.scale(config.brightness_multiplier * config.hue_output_brightness);
+                            }
+                            let channel_ids: Vec<u8> =
+                                config.zones.iter().map(|z| z.channel_id).collect();
+                            let mut adapter = HueOutput {
+                                transport: dtls, packets, channel_ids: &channel_ids,
+                                use_xy: config.use_xy_gamut,
+                            };
+                            if let Err(err) = adapter.send(&LightFrame {
+                                colors: &colors, source: ColorSource::Histogram,
+                            }) { warn!("Hue histogram output failed: {err}"); }
+                        }
+                    }
+                }
+                if nanoleaf_active && nanoleaf_sync_enabled {
+                    if let (Some(ref sampler), Some(ref mut transport)) =
+                        (&nanoleaf_sampler, &mut nanoleaf_streamer) {
+                        if let Ok(mut colors) =
+                            config.histogram.map_leds(&regions, &sampler.screen_positions()) {
+                            for c in &mut colors {
+                                *c = c.scale(config.brightness_multiplier * config.nanoleaf_output_brightness);
+                            }
+                            if let Err(err) = transport.send(&LightFrame {
+                                colors: &colors, source: ColorSource::Histogram,
+                            }) { warn!("Nanoleaf histogram output failed: {err}"); }
+                        }
+                    }
+                }
+            } else {
+                shared_state.capture_source.store(2, Ordering::Relaxed);
+                // Fail closed, not by sending the synthetic MockCapture's colours.
+                // Hold last real colour for <=500ms, then explicitly send black.
+                let expired = last_histogram_valid
+                    .is_none_or(|t| t.elapsed() > Duration::from_millis(500));
+                if expired && !histogram_black_sent {
+                    histogram_black_sent = true;
+                    for (device, _, _) in &mut wled_outputs {
+                        let black = vec![RgbColor::new(0,0,0);device.led_count()];
+                        let _ = device.send(&LightFrame {
+                            colors: &black, source: ColorSource::Histogram,
+                        });
+                    }
+                    if let Some(ref mut nl) = nanoleaf_streamer {
+                        let black = vec![RgbColor::new(0,0,0);nl.panel_count()];
+                        let _ = nl.send(&LightFrame {
+                            colors: &black, source: ColorSource::Histogram,
+                        });
+                    }
+                    if let (Some(ref mut dtls), Some(ref mut packets)) =
+                        (&mut hue_dtls, &mut hue_packet_builder) {
+                        let ids: Vec<u8> = config.zones.iter().map(|z|z.channel_id).collect();
+                        let black = vec![RgbColor::new(0,0,0);ids.len()];
+                        let mut output = HueOutput {
+                            transport: dtls, packets, channel_ids: &ids, use_xy: false,
+                        };
+                        let _ = output.send(&LightFrame {
+                            colors: &black, source: ColorSource::Histogram,
+                        });
+                    }
+                }
+            }
+            if !runtime::wait_for_capture_retry(frame_interval, &shutdown).await {
+                break 'sync_loop;
+            }
+            continue 'sync_loop;
+        }
+
+        if using_histogram {
+            // Confirm histogram resource is released before reacquiring scaler.
+            histogram_capture = None;
+            using_histogram = false;
+            histogram_black_sent = false;
+            last_histogram_valid = None;
+            capture = create_capture(config.capture_width, config.capture_height);
+            shared_state.capture_hardware.store(capture.is_real_hardware(), Ordering::Relaxed);
+            capture_retry.success();
+            capture_recovery = CaptureRecovery::default();
+            info!("Unprotected media stable; returned to normal frame capture");
+        }
+        shared_state.capture_source.store(0, Ordering::Relaxed);
 
         // If currently on fallback MockCapture, rapidly probe if hardware VtCapture has become available
         // (e.g. if the TV was on the home screen at boot or during input/format switch)

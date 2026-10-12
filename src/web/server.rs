@@ -261,6 +261,10 @@ pub struct SharedState {
     pub wled_last_send_ok: AtomicBool,
     pub wled_count: AtomicU32,
     pub capture_hardware: AtomicBool,
+    /// 0: frame, 1: populated histogram, 2: histogram waiting/blackout.
+    pub capture_source: AtomicU32,
+    /// 0: unknown, 1: clear, 2: protected. Resource classifier is TV-specific.
+    pub playback_class: AtomicU32,
     /// 0 = unknown, 1 = active, 2 = standby/off.
     pub tv_power_state: AtomicU32,
     pub capture_resolution: RwLock<String>,
@@ -293,6 +297,8 @@ impl SharedState {
             wled_last_send_ok: AtomicBool::new(false),
             wled_count: AtomicU32::new(0),
             capture_hardware: AtomicBool::new(false),
+            capture_source: AtomicU32::new(0),
+            playback_class: AtomicU32::new(0),
             tv_power_state: AtomicU32::new(0),
             capture_resolution: RwLock::new(capture_res),
             current_settings: RwLock::new(initial_settings),
@@ -381,6 +387,8 @@ struct StatusResponse {
     wled_outputs: u32,
     wled_last_send_ok: bool,
     capture_hardware: bool,
+    capture_source: &'static str,
+    playback_class: &'static str,
     capture_resolution: String,
     settings: LiveSettings,
     nanoleaf_colors: Vec<RgbColor>,
@@ -499,6 +507,12 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
         wled_outputs: shared.wled_count.load(Ordering::Relaxed),
         wled_last_send_ok: shared.wled_last_send_ok.load(Ordering::Relaxed),
         capture_hardware: shared.capture_hardware.load(Ordering::Relaxed),
+        capture_source: match shared.capture_source.load(Ordering::Relaxed) {
+            1 => "histogram", 2 => "histogram-waiting", _ => "frame",
+        },
+        playback_class: match shared.playback_class.load(Ordering::Relaxed) {
+            1 => "clear", 2 => "protected", _ => "unknown",
+        },
         capture_resolution: shared.capture_resolution.read().unwrap().clone(),
         settings: shared.current_settings.read().unwrap().clone(),
         nanoleaf_colors: shared.live_nanoleaf_colors.read().unwrap().clone(),
