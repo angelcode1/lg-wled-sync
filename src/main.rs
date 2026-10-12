@@ -253,6 +253,9 @@ impl OutputFanout<'_> {
         let calibration = calibration_pattern(self.shared);
         let source = self.field.source();
         let adaptive = self.config.adaptive_throttling;
+        if self.field.scene_cut {
+            self.gate.clear();
+        }
 
         if self.hue_enabled {
             let ids: Vec<u8> = self.config.zones.iter().map(|zone| zone.channel_id).collect();

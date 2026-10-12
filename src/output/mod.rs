@@ -90,3 +90,39 @@ impl LightOutput for NanoleafUdpStreamer {
         NanoleafUdpStreamer::send_frame(self, frame.colors, 0)
     }
 }
+
+#[cfg(test)]
+mod spatial_fanout_tests {
+    use super::*;
+    use crate::capture::histogram::HistogramSettings;
+    use crate::color::pipeline::ColorPipeline;
+    use crate::config::Config;
+
+    #[test]
+    fn same_histogram_field_maps_to_all_vendors_without_more_processing() {
+        let mut pipeline=ColorPipeline::new(1.0, 0.0, false);
+        let pixels=[RgbColor::new(60, 80, 100); 16];
+        let field=pipeline.histogram(&pixels, &HistogramSettings::default()).unwrap();
+        assert_eq!(field.source(), ColorSource::Histogram);
+        let led_points = [Point{x:0.0,y:0.5}, Point{x:1.0,y:0.5}];
+        let wled = wled::WledUdpStreamer::map_field(&field, &led_points, 1.0);
+        let nanoleaf = NanoleafUdpStreamer::map_field(&field, &led_points, 1.0);
+        let cfg = Config::new_default("", "", "", "");
+        let hue = HueOutput::map_field(&field, &cfg.zones, 1.0);
+        assert_eq!(wled, nanoleaf);
+        assert!(hue.iter().all(|&c| c == wled[0]));
+        assert_eq!(wled, vec![RgbColor::new(60, 80, 100); 2]);
+    }
+
+    #[test]
+    fn mapping_applies_only_final_vendor_brightness_trim() {
+        let mut pipeline=ColorPipeline::new(1.0, 0.0, false);
+        let raw=[RgbColor::new(120, 80, 40); 16];
+        let field=pipeline.histogram(&raw, &HistogramSettings::default()).unwrap();
+        let pos=[Point{x:0.0,y:0.0}];
+        let full = wled::WledUdpStreamer::map_field(&field, &pos, 1.0);
+        let half = wled::WledUdpStreamer::map_field(&field, &pos, 0.5);
+        assert_eq!(full[0], raw[0]);
+        assert_eq!(half[0], RgbColor::new(60,40,20));
+    }
+}
