@@ -1,0 +1,43 @@
+name: Format Rust (manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rustfmt:
+    name: Apply rustfmt to DRM/WLED development branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the development branch
+        uses: actions/checkout@v7
+        with:
+          ref: feature/vendor-neutral-wled-drm-first
+          fetch-depth: 1
+      - name: Install Rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format all Rust sources
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Commit formatting only when changed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'Already formatted; nothing to commit'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- '*.rs'
+          git diff --cached --check
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'style: apply rustfmt to shared color pipeline'
+          git push origin HEAD:refs/heads/feature/vendor-neutral-wled-drm-first
