@@ -1,6 +1,8 @@
 //! WLED realtime UDP DRGB/DNRGB transport, no Hue bridge or separate server.
 use crate::color::RgbColor;
 use crate::output::{LightFrame, LightOutput};
+use crate::color::pipeline::ColorField;
+use crate::output::perimeter::Point;
 use anyhow::Result;
 use std::io::{self, Error, ErrorKind};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
@@ -58,6 +60,11 @@ impl WledUdpStreamer {
         socket.connect(target)?;
         socket.set_nonblocking(true)?;
         Ok(Self { socket, target, count })
+    }
+    /// WLED maps its own configured LED geometry from the shared field;
+    /// this never modifies or smooths the upstream colours.
+    pub fn map_field(field: &ColorField, positions: &[Point], gain: f32) -> Vec<RgbColor> {
+        field.points(positions).into_iter().map(|c| c.scale(gain)).collect()
     }
     pub fn led_count(&self) -> usize { self.count }
     pub fn target(&self) -> SocketAddr { self.target }

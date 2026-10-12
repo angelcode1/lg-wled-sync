@@ -1,10 +1,13 @@
 //! Vendor-neutral colour output. Capture provenance and geometry are independent
 //! of transport; a vendor adapter receives only an RGB colour frame.
 //! It MUST NOT assume full-frame provenance when source is histogram.
+pub mod gate;
 pub mod perimeter;
 pub mod wled;
 
-use crate::color::{HueGamut, RgbColor};
+use crate::color::{pipeline::ColorField, HueGamut, RgbColor};
+use crate::config::LightZone;
+use crate::output::perimeter::Point;
 use crate::hue::{HueDtlsClient, HueStreamPacketBuilder};
 use crate::nanoleaf::NanoleafUdpStreamer;
 use anyhow::{bail, Result};
@@ -34,6 +37,24 @@ pub struct HueOutput<'a> {
     pub packets: &'a mut HueStreamPacketBuilder,
     pub channel_ids: &'a [u8],
     pub use_xy: bool,
+}
+
+impl HueOutput<'_> {
+    /// Hue owns 2D Entertainment Area geometry; the shared colour field is
+    /// already processed and never undergoes additional smoothing here.
+    pub fn map_field(field: &ColorField, zones: &[LightZone], gain: f32) -> Vec<RgbColor> {
+        zones.iter().map(|z| {
+            field.zone(z.x_min, z.x_max, z.y_min, z.y_max).scale(gain)
+        }).collect()
+    }
+}
+
+impl NanoleafUdpStreamer {
+    /// Nanoleaf's physical panel ordering comes from the controller, not
+    /// from any assumptions about frame or histogram spatial samples.
+    pub fn map_field(field: &ColorField, positions: &[Point], gain: f32) -> Vec<RgbColor> {
+        field.points(positions).into_iter().map(|c| c.scale(gain)).collect()
+    }
 }
 
 impl LightOutput for HueOutput<'_> {

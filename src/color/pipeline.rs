@@ -233,8 +233,11 @@ impl ColorPipeline {
         let mut out = Vec::with_capacity(CELLS);
         for (i, c) in raw.into_iter().enumerate() {
             let mean = FloatColor::new(c.r as f32, c.g as f32, c.b as f32);
+            // A newly selected source starts from its real first sample,
+            // not black or stale colours from the previous backend.
+            let previous = if source_changed { mean } else { self.smoothed[i] };
             let result = self.processor.process(mean, mean, mean.luminance(),
-                self.smoothed[i], scene_cut, elapsed);
+                previous, scene_cut, elapsed);
             self.smoothed[i] = result;
             out.push(result.to_rgb());
         }
