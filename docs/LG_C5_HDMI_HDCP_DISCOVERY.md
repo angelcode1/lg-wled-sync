@@ -81,7 +81,9 @@ Use a local Mac Python 3 parser to select exactly one foreground
 before issuing read-only method requests:
 
 ```bash
-PIPELINES="$(ssh root@192.168.8.184 "sleep 6 | luna-send -i -f luna://com.webos.media/getActivePipelines '{}'")" || exit 1
+bash <<'MAC'
+set -euo pipefail
+PIPELINES="$(ssh -n root@192.168.8.184 "sleep 6 | luna-send -i -f luna://com.webos.media/getActivePipelines '{}'")"
 PIPELINE_ID="$(
   printf '%s\n' "$PIPELINES" | python3 -c '
 import json, re, sys
@@ -95,13 +97,14 @@ if len(matches) != 1 or not re.fullmatch(r"_[A-Za-z0-9_-]+", matches[0]):
     raise SystemExit("No unique, valid foreground HDMI TV pipeline")
 print(matches[0])
 '
-)" || exit 1
+)"
 printf 'Foreground HDMI pipeline: %s\n' "$PIPELINE_ID"
 for method in getSignalState getHDMIInfo getHDMIDiagnosticsInfo; do
   echo "===== $method ====="
-  ssh root@192.168.8.184 \
+  ssh -n root@192.168.8.184 \
     "sleep 6 | luna-send -i -f luna://com.webos.service.extinputs.hdmi/$method '{\"pipelineId\":\"$PIPELINE_ID\"}'"
 done
+MAC
 ```
 
 **Do not infer HDCP status** from EIM's 5V/signal booleans. The missing
