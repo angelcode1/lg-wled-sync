@@ -1331,6 +1331,42 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             continue 'sync_loop;
         }
 
+        // Reconnect each configured vendor independently.
+        if hue_active && hue_sync_enabled && hue_dtls.is_none() && hue_retry.ready() {
+            match reconnect_hue(&config) {
+                Ok(client) => {
+                    hue_dtls = Some(client);
+                    hue_retry.success();
+                    shared_state.hue_connected.store(true, Ordering::Relaxed);
+                    output_gate.clear();
+                }
+                Err(err) => {
+                    hue_retry.failure();
+                    warn!("Hue reconnect unavailable: {err}");
+                }
+            }
+        }
+        if nanoleaf_active && nanoleaf_sync_enabled
+            && nanoleaf_streamer.is_none() && nanoleaf_retry.ready() {
+            if let (Some(cfg), Some(layout)) =
+                (config.nanoleaf.as_ref(), nanoleaf_sampler.as_ref()) {
+                match nanoleaf::enable_external_control(&cfg.ip, &cfg.auth_token)
+                    .and_then(|port| NanoleafUdpStreamer::new(
+                        &cfg.ip, port, layout.panel_ids())) {
+                    Ok(transport) => {
+                        nanoleaf_streamer = Some(transport);
+                        nanoleaf_retry.success();
+                        shared_state.nanoleaf_connected.store(true, Ordering::Relaxed);
+                        output_gate.clear();
+                    }
+                    Err(err) => {
+                        nanoleaf_retry.failure();
+                        warn!("Nanoleaf reconnect unavailable: {err}");
+                    }
+                }
+            }
+        }
+
         // In auto FPS mode, dynamically update cadence if TV source rate changed (e.g. film started)
         if config.fps == 0 {
             if let Some(new_fps) = detect_source_fps() {
