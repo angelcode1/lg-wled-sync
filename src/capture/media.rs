@@ -56,9 +56,19 @@ pub fn classify(value: &Value) -> PlaybackClass {
 
 pub async fn query() -> PlaybackClass {
     let mut command = Command::new("luna-send");
-    command.args(["-n", "1", "luna://com.webos.media/getActivePipelines", "{}"]);
+    // -f requests a JSON reply; -w bounds waiting for a Luna response.
+    // An empty stdout (even if luna-send exits 0) is NOT a clear session.
+    command.args([
+        "-n",
+        "1",
+        "-f",
+        "-w",
+        "850",
+        "luna://com.webos.media/getActivePipelines",
+        "{}",
+    ]);
     command.kill_on_drop(true);
-    let Ok(Ok(output)) = tokio::time::timeout(Duration::from_millis(850), command.output()).await
+    let Ok(Ok(output)) = tokio::time::timeout(Duration::from_millis(1100), command.output()).await
     else {
         return PlaybackClass::Unknown;
     };
@@ -101,9 +111,17 @@ pub fn parse_model_reply(raw: &str) -> Option<String> {
 /// Read-only system-property query, guarded against hung Luna services.
 pub async fn query_tv_model() -> Option<String> {
     let mut command = Command::new("luna-send");
-    command.args(["-n", "1", MODEL_URI, r#"{"keys":["modelName"]}"#]);
+    command.args([
+        "-n",
+        "1",
+        "-f",
+        "-w",
+        "1400",
+        MODEL_URI,
+        r#"{"keys":["modelName"]}"#,
+    ]);
     command.kill_on_drop(true);
-    let output = tokio::time::timeout(Duration::from_millis(850), command.output())
+    let output = tokio::time::timeout(Duration::from_millis(1700), command.output())
         .await
         .ok()?
         .ok()?;

@@ -133,3 +133,51 @@ Replace the example model with **the exact modelName in preflight.txt**, not a g
 
 The helper's `preflight`, `record`, and `fetch` modes only read from the TV. `launch` explicitly opens the installed HyperDRM calibration app, and the TV's own wizard performs measurement. The helper does not root the TV, install a service, change configuration or enable autostart.
 
+
+
+## C5 observation on 2026-10-12: missing service and blank Luna replies
+
+The owner confirmed through root SSH that neither
+\`/media/developer/apps/usr/palm/applications/org.webosbrew.histogramhyperion\`
+nor
+\`/media/developer/apps/usr/palm/services/org.webosbrew.histogramhyperion.service\`
+exists. The earlier launch returned \`{"errorCode":-101,"returnValue":false,"errorText":"not exist"}\`.
+No calibration observations can be collected until the service is deliberately installed.
+
+\`luna-send -n 1\` returned an empty stdout with exit status 0 for both
+\`getSystemInfo\` and \`getActivePipelines\`. That DOES NOT prove those
+services are healthy or expose usable replies. The updated diagnostics use
+\`-f\` for formatted JSON and \`-w 2000\` for a bounded response timeout,
+as documented in the official webOS luna-send usage guide. Try known-good
+endpoints, and \`luna-send-pub\` if installed, to distinguish bus/endpoint
+failure from an unavailable method. Playback remains \`Unknown\` if no
+parseable JSON arrives; measured spatial profiles cannot be applied without
+an exact model identity.
+
+\`\`\`sh
+ssh root@192.168.8.184 'sh -s' <<'TV'
+for tool in luna-send luna-send-pub; do
+  command -v "$tool" || true
+done
+echo '=== Test known system endpoint ==='
+luna-send -n 1 -f -w 2000 \
+  luna://com.webos.settingsservice/getSystemSettings \
+  '{"keys":["localeInfo"]}'
+echo "exit=$?"
+echo '=== C5 model ==='
+luna-send -n 1 -f -w 2000 \
+  luna://com.webos.service.tv.systemproperty/getSystemInfo \
+  '{"keys":["modelName"]}'
+echo "exit=$?"
+echo '=== C5 media (try with a video playing) ==='
+luna-send -n 1 -f -w 2000 \
+  luna://com.webos.media/getActivePipelines '{}'
+echo "exit=$?"
+TV
+\`\`\`
+
+No install or capture initialization is included in that diagnostic block.
+The collector's \`record\`, \`launch\` and \`fetch\` modes now reject the
+missing service, app and calibration file, respectively, rather than
+generating empty "success" logs.
+
