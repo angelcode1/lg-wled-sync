@@ -3,6 +3,27 @@
 Use the built-in HyperDRM 0.13.0 calibration wizard from the user-supplied HyperDRM source (app/wizard.js, app/calibration.js).
 **The C5 has no verified measured profile in the repository. Do not substitute the LG G4 profile.**
 
+## Confirmed C5 Luna invocation
+
+On this LG OLED42C5PSA.AAUQLJD (SDK 10), `luna-send -n 1` exits
+with no text even on valid services. **Use interactive private Luna**:
+keep stdin open long enough to receive one JSON reply, then stop the
+client. The Rust daemon now implements this without blocking light output.
+
+```bash
+ssh root@192.168.8.184 'sleep 6 | luna-send -i -f luna://com.webos.service.tv.systemproperty/getSystemInfo '\''{"keys":["modelName"]}'\'''
+ssh root@192.168.8.184 'sleep 6 | luna-send -i -f luna://com.webos.media/getActivePipelines '\''{}'\'''
+```
+
+The reported C5 media pipeline while HDMI1 is selected contains
+`HDMI_INPUT`, `VHDMIRX`, `AHDMIRX` and `MAIN_SCALER` but not
+`SVP_CPB`. This is **Unknown**, not proof of absent HDCP.
+A protected internal streaming-app session still needs measurement.
+
+The confirmed exact modelName is `OLED42C5PSA.AAUQLJD`. Use that exact
+value when importing a measured C5 histogram profile, rather than an
+illustrative model name like OLED65C5PSA. No profile has been measured yet.
+
 ## LG C5 kernel versus 32-bit application ABI
 
 On the tested C5, `uname -m` reports **aarch64** because the TV runs a
@@ -18,7 +39,7 @@ Do **not** replace the project ARMv7 Docker build with AArch64 based only on
 `uname -m`, and do not reject a 32-bit HyperDRM IPK merely because the
 kernel is 64-bit.
 
-The initial SSH capture yielded blank Luna replies and no native symbol
+The initial noninteractive SSH commands yielded blank Luna replies and no native symbol
 listing. The old collector swallowed `readelf` errors; an empty result did
 **not** establish the absence of histogram symbols. The attempted launch
 returned `{"errorCode":-101,"returnValue":false,"errorText":"not exist"}`:

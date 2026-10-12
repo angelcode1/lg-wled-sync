@@ -27,12 +27,39 @@ Do not commit full proprietary LG library or device logs to the public repositor
 - The Rust `HistogramCapture` C ABI signatures and 0x604-byte record type match the reference HyperDRM source (`native/histogram.h`, `native/probe.c`, `native/service.c`), **not** a newly recovered OEM LG header.
 - LG's `printLog` variadic symbol is supplied by a small C shim and verified by ARMv7 CI exports.
 
+## LG C5 private Luna confirmed (2026-10-12)
+
+The owner's actual root-shell C5 results establish that private `luna-send
+-i -f` returns parseable JSON when stdin is kept open, whereas `luna-send
+-n 1` returned **zero bytes and exit 0** even for known-good methods.
+Public `luna-send-pub -i -f` denied `getForegroundAppInfo` with
+`errorCode: -1`. The Rust daemon now uses a bounded interactive private
+Luna client in a background task, retains stdin until the JSON is read,
+then terminates/reaps the local client.
+
+- Exact TV model: `OLED42C5PSA.AAUQLJD`
+- webOS SDK: `10.0.0`
+- Foreground app: `com.webos.app.hdmi1`
+- Working `getActivePipelines` response: four entries with types
+  `vtclient`, `avconnector`, `tv`, `avconnector`.
+- The foreground `tv` entry references `HDMI_INPUT`, `VHDMIRX`,
+  `AHDMIRX`, `ADEC`, `ADEC_BANDWIDTH`. Another `avconnector` has
+  `MAIN_SCALER`.
+- No `SVP_CPB` or foreground `media/VDEC` resource in this **specific
+  HDMI state**. The Rust classifier appropriately returns **Unknown**,
+  which does **not** imply HDMI is unprotected/HDCP-free.
+
+The exact model is required for any new C5 spatial mapping; do not substitute
+the 65-inch C5 sample identifier from previous documentation. HyperDRM's
+application and service are still absent; their calibration wizard cannot
+run until deliberately installed.
+
 ## Not yet proven
 
 - Actual `dlopen` of `libvtcapture` from our daemon on the C5, including transitive runtime symbols.
 - `initHistogram` success and permission/ownership conditions.
 - Successful `setPresetHistogram`, nonempty valid histogram samples, spatial calibration or DRM content coverage.
-- C5 `getActivePipelines` schema and `getSystemInfo` reply. The earlier SSH preflight recorded blank responses; the collector did not capture exit codes.
+- Verified model and HDMI pipeline JSON are now available, but not a C5 media-app protected-playback trace or HDMI HDCP status.
 - Installed HyperDRM application and service. Earlier app launch returned `-101 not exist`, and the expected calibration file was absent.
 
 ## Next read-only TV diagnostics
