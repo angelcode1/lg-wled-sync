@@ -3,6 +3,47 @@
 Use the built-in HyperDRM 0.13.0 calibration wizard from the user-supplied HyperDRM source (app/wizard.js, app/calibration.js).
 **The C5 has no verified measured profile in the repository. Do not substitute the LG G4 profile.**
 
+## LG C5 kernel versus 32-bit application ABI
+
+On the tested C5, `uname -m` reports **aarch64** because the TV runs a
+64-bit **kernel**. That does **not** determine the executable ABI: this C5
+runs **32-bit ARM userspace applications**. Continue targeting
+`armv7-unknown-linux-gnueabi` for this fork unless an ELF inspection of
+the *actual application and native libraries* proves a different userspace
+ABI. The C5 reports glibc 2.35; an ARMv7 build limited to GLIBC <= 2.28 is
+not inherently incompatible with newer glibc. Inspect dynamic loader,
+EABI and native dependencies before deployment.
+
+Do **not** replace the project ARMv7 Docker build with AArch64 based only on
+`uname -m`, and do not reject a 32-bit HyperDRM IPK merely because the
+kernel is 64-bit.
+
+The initial SSH capture yielded blank Luna replies and no native symbol
+listing. The old collector swallowed `readelf` errors; an empty result did
+**not** establish the absence of histogram symbols. The attempted launch
+returned `{"errorCode":-101,"returnValue":false,"errorText":"not exist"}`:
+confirm installed app/service paths and Luna availability before running
+the region recorder or calibration wizard again.
+
+The updated repository collector records `getconf LONG_BIT`, command
+availability and Luna exit codes, and can copy the LG library for offline
+ELF inspection on a Mac without modifying the TV:
+
+```bash
+git checkout feature/vendor-neutral-wled-drm-first
+TV_HOST=192.168.8.184
+bash scripts/c5_profile.sh "$TV_HOST" preflight
+bash scripts/c5_profile.sh "$TV_HOST" pull-lib
+file c5-evidence/libvtcapture.so.1.0.0
+# If greadelf is unavailable: brew install binutils
+greadelf -h c5-evidence/libvtcapture.so.1.0.0
+greadelf -W --dyn-syms c5-evidence/libvtcapture.so.1.0.0 \
+  | grep -E 'vtCapture_(initHistogram|setPresetHistogram|getHistogram|finalizeHistogram)'
+```
+
+Check that the capture library is `ELF32` / `ARM`, and distinguish
+unavailable `readelf` or `luna-send` from an API actually missing on C5.
+
 ## TV preflight (read-only)
 
     id
@@ -40,7 +81,7 @@ Failure to find reliable regions on each edge means retain the default average p
 Convert the measured 4-16 sorted rim points (positions 0..4, region indexes 0..15)
 into the existing Rust config's histogram.profile=custom and histogram.points fields.
 Keep the exact modelName stored alongside the measured profile; do not apply it
-to other TVs. The Rust runtime does not yet enforce model identity.
+to other TVs. The Rust runtime now enforces model identity for custom spatial mappings.
 
 ## Optional read-only raw-region recording during the wizard
 
