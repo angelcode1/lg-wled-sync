@@ -642,6 +642,47 @@ No action to edit LS2 policy, restart the Luna hub, force native
 capture or bypass secure-video refusal is warranted before this
 exception's origin is understood.
 
+## 2026-10-13: UMS public connector delegates to an implementation DSO
+
+The owner copied `/usr/lib/libums_connector.so.1` from the LG C5 and
+extracted its symbols/strings. The library exposes public
+`UMSConnector` and `UMSConnector_impl` C++ method signatures and names
+`libums_connector_impl.so.1` in its dynamic dependencies, alongside
+`libluna-service2.so.3`. This indicates a separate **implementation
+DSO** beneath the UMS connector and materially narrows the potential
+origin of the native `LSRegisterPubPriv FAILED` exception.
+
+The original grep included `UMSConnector` and was limited to
+`head -110`: the large number of mangled symbols therefore **cannot
+show whether `LSRegisterPubPriv FAILED` is absent** later in the same
+library. The callsite/throw origin is still unverified.
+
+Next *offline* diagnostic: inspect the full exact-error match in both
+UMS libraries, and copy the implementation DSO only if it exists:
+
+```bash
+GSTRINGS="$(brew --prefix binutils)/bin/gstrings"
+"$GSTRINGS" -a ~/Downloads/c5-native-libs/libums_connector.so.1 \
+  | grep -iE -C 2 'LSRegisterPubPriv FAILED|LSRegisterPubPriv|LSRegister|invalid permissions' \
+  || true
+
+ssh root@192.168.8.184 \
+  'ls -l /usr/lib/libums_connector_impl.so.1; readlink -f /usr/lib/libums_connector_impl.so.1'
+scp -O root@192.168.8.184:/usr/lib/libums_connector_impl.so.1 \
+  ~/Downloads/c5-native-libs/libums_connector_impl.so.1
+
+"$GSTRINGS" -a ~/Downloads/c5-native-libs/libums_connector_impl.so.1 \
+  | grep -iE -C 2 'LSRegisterPubPriv FAILED|LSRegisterPubPriv|LSRegister|invalid permissions' \
+  || true
+```
+
+If the implementation exists, inspect ELF relocations / Thumb callsites
+from the copied binary privately to determine whether it constructs or
+throws the actual error, and which bus name is involved. Do not upload
+proprietary vendor binaries into Git, grant broad LS2 roles, or restart
+the hub for this diagnostic. The capture service's DRM refusal policies
+must remain intact.
+
 ## Build and download
 
 GitHub Actions on the `feature/vendor-neutral-wled-drm-first` branch runs
