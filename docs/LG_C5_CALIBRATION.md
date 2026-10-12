@@ -64,3 +64,31 @@ On a Linux build host, the provided HyperDRM 0.13.0 source passed:
 - gcc -Wall -Wextra -Werror -O2 native/test_playback.c -ldl -o test-playback && ./test-playback
 
 These do not validate our Rust fork or the C5's native device behaviour.
+
+## Model-bound import (2026 development branch)
+
+The fork now enforces a model guard before using spatial histogram mappings:
+- The saved HyperDRM calibration must contain the exact `model` returned by the C5 system property endpoint.
+- A custom profile needs at least 4 measured points covering all four screen edges.
+- The runtime reads the TV model via `getSystemInfo` and refuses mismatched/unknown custom or G4 spatial mappings rather than borrowing the G4 profile.
+- The default averaged-colour histogram profile remains usable if the C5 has not been calibrated.
+
+The repo contains a preflight/measurement helper and an importer:
+
+```bash
+git checkout feature/vendor-neutral-wled-drm-first
+export TV_HOST=192.168.8.X    # replace with actual LG C5 IP
+bash scripts/c5_profile.sh "$TV_HOST" preflight
+bash scripts/c5_profile.sh "$TV_HOST" record  # Terminal A; samples status
+bash scripts/c5_profile.sh "$TV_HOST" launch  # Terminal B; explicitly opens HyperDRM wizard
+# Save the profile with the remote on the TV.
+bash scripts/c5_profile.sh "$TV_HOST" fetch
+python3 scripts/c5_profile_import.py c5-evidence/saved-calibration.json \
+  --model 'OLED65C5PSA' --output c5-histogram-config.json
+python3 -m unittest discover -s scripts -p test_c5_profile_import.py -v
+```
+
+Replace the example model with **the exact modelName in preflight.txt**, not a guessed model/size. Merge the output fragment with the existing daemon config; it is not a complete config.json. All evidence files remain local and should not be committed to GitHub because system status may contain private network details. Do not start the development daemon while the HyperDRM calibration wizard owns VT_CAPTURE.
+
+The helper's `preflight`, `record`, and `fetch` modes only read from the TV. `launch` explicitly opens the installed HyperDRM calibration app, and the TV's own wizard performs measurement. The helper does not root the TV, install a service, change configuration or enable autostart.
+

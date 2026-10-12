@@ -45,3 +45,5 @@ Changing workflow files or adding these tools does not by itself constitute
 a passing build. Inspect individual job logs. Do not install the binary on
 the TV until tests, ARMv7 build, symbol/version checks and model-specific
 native histogram validation are complete.
+
+The CI host job also checks C5 collector bash syntax and runs the offline profile importer unittest suite.

@@ -53,6 +53,10 @@ jobs:
           node --version
       - name: Verify release metadata
         run: python3 scripts/check_release.py
+      - name: Verify C5 collector shell syntax
+        run: bash -n scripts/c5_profile.sh
+      - name: Test C5 profile importer (offline)
+        run: python3 -m unittest discover -s scripts -p test_c5_profile_import.py -v
       - name: Enforce rustfmt
         run: cargo fmt --all -- --check
       - name: Run locked Rust test suite
