@@ -21,12 +21,24 @@ fn main() {
     let object = out.join("lg_printlog.o");
     let archive = out.join("liblg_printlog.a");
     let status = Command::new(&cc)
-        .args(["-std=c11", "-fPIC", "-O2", "-Wall", "-Wextra", "-Werror",
-            "-c", "native/lg_printlog.c", "-o"])
+        .args([
+            "-std=c11",
+            "-fPIC",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-c",
+            "native/lg_printlog.c",
+            "-o",
+        ])
         .arg(&object)
         .status()
         .expect("C compiler unavailable for LG vtcapture ABI shim");
-    assert!(status.success(), "LG vtcapture C ABI shim failed compilation");
+    assert!(
+        status.success(),
+        "LG vtcapture C ABI shim failed compilation"
+    );
     let status = Command::new(&ar)
         .arg("crs")
         .arg(&archive)
