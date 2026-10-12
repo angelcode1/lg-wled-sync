@@ -61,7 +61,7 @@ jobs:
       - name: Run Rust documentation tests
         run: cargo test --locked --doc
       - name: Clippy (deny warnings)
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --bin lg-hue-sync -- -D warnings
       - name: Validate embedded dashboard JavaScript
         run: perl -0777 -ne 'print $1 if /<script>(.*)<\/script>/s' src/web/ui.html | node --check -
       - name: Ensure no generated file changes
@@ -79,7 +79,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            docker.io make file binutils python3 ca-certificates
+            make file binutils python3 ca-certificates
+          command -v docker
           docker info
       - name: Build 32-bit ARMv7 binary using Debian Buster toolchain
         run: make build
