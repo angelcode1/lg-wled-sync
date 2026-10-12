@@ -89,6 +89,7 @@ pub struct ColorPipeline {
     last_global: Option<RgbColor>,
     frame_number: u64,
     letterbox: bool,
+    spatial_blend: f32,
 }
 
 impl ColorPipeline {
@@ -101,13 +102,15 @@ impl ColorPipeline {
             last_global: None,
             frame_number: 0,
             letterbox,
+            spatial_blend: 0.0,
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn tune(&mut self, saturation: f32, noise: f32, gamma: f32,
         peak_weight: f32, rise: f32, fall: f32, strict_black: bool,
-        max_step: u8, tone_lift: bool, letterbox: bool) {
+        max_step: u8, tone_lift: bool, letterbox: bool,
+        spatial_blend: f32) {
         self.processor.set_saturation_boost(saturation);
         self.processor.set_noise_gate_threshold(noise);
         self.processor.set_gamma(gamma);
@@ -117,6 +120,7 @@ impl ColorPipeline {
         self.processor.set_max_color_step(max_step);
         self.processor.set_hdr_tone_mapping(tone_lift);
         self.letterbox = letterbox;
+        self.spatial_blend = spatial_blend.clamp(0.0, 0.5);
     }
 
     pub fn reset(&mut self) {
@@ -135,16 +139,11 @@ impl ColorPipeline {
             bail!("invalid decoded frame dimensions or buffer length");
         }
         self.frame_number = self.frame_number.saturating_add(1);
-        let rect = if self.letterbox
-            && (self.frame_number == 1 || self.frame_number.is_multiple_of(15)) {
+        // Recompute once per captured frame, rather than independently for
+        // each vendor. Capture dimensions are already bounded by Config.
+        let rect = if self.letterbox {
             ZoneSampler::detect_active_rect(data, width, height, bgra)
-        } else {
-            // Recompute on every capture sample, not per vendor. This is
-            // cheap at 320x180 and prevents stale bars between detection ticks.
-            if self.letterbox {
-                ZoneSampler::detect_active_rect(data, width, height, bgra)
-            } else { Default::default() }
-        };
+        } else { Default::default() };
 
         let mut cells = Vec::with_capacity(CELLS);
         for y in 0..GRID_HEIGHT {
@@ -240,6 +239,42 @@ impl ColorPipeline {
                 previous, scene_cut, elapsed);
             self.smoothed[i] = result;
             out.push(result.to_rgb());
+        }
+        // Optional four-neighbour blend runs over the common grid once.
+        // Black cells remain off and blending never feeds back into temporal
+        // state. O(grid cells), suitable for older ARMv7 hardware.
+        if self.spatial_blend > 0.0 {
+            let original = out.clone();
+            for y in 0..GRID_HEIGHT {
+                for x in 0..GRID_WIDTH {
+                    let index = y * GRID_WIDTH + x;
+                    let center = original[index];
+                    if center == RgbColor::new(0,0,0) { continue; }
+                    let mut totals = [0u32; 3];
+                    let mut count = 0u32;
+                    for (dx,dy) in [(-1isize,0isize),(1,0),(0,-1),(0,1)] {
+                        let nx=x as isize+dx;
+                        let ny=y as isize+dy;
+                        if nx<0 || ny<0 || nx>=GRID_WIDTH as isize || ny>=GRID_HEIGHT as isize {continue;}
+                        let c=original[ny as usize*GRID_WIDTH+nx as usize];
+                        totals[0]+=c.r as u32;
+                        totals[1]+=c.g as u32;
+                        totals[2]+=c.b as u32;
+                        count+=1;
+                    }
+                    if count == 0 {continue;}
+                    let avg = RgbColor::new(
+                        (totals[0]/count) as u8,
+                        (totals[1]/count) as u8,
+                        (totals[2]/count) as u8,
+                    );
+                    let strength = self.spatial_blend;
+                    let mix=|a:u8,b:u8| ->
+                        u8 { (a as f32*(1.0-strength)+b as f32*strength).round() as u8 };
+                    out[index]=RgbColor::new(mix(center.r,avg.r),
+                        mix(center.g,avg.g),mix(center.b,avg.b));
+                }
+            }
         }
         ColorField { source, scene_cut, pixels: out }
     }

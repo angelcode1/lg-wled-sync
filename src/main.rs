@@ -520,8 +520,13 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut hue_sync_enabled = config.hue_sync_enabled;
     let mut nanoleaf_sync_enabled = config.nanoleaf_sync_enabled;
     let mut hue_dtls = if hue_active && hue_sync_enabled && pipeline_should_run {
-        let client = reconnect_hue(&config)?;
-        Some(client)
+        match reconnect_hue(&config) {
+            Ok(client) => Some(client),
+            Err(error) => {
+                warn!("Hue unavailable at start; keeping other outputs running: {error}");
+                None
+            }
+        }
     } else {
         None
     };
@@ -566,14 +571,17 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             n_cfg.alignment,
         );
         let streamer = if nanoleaf_sync_enabled && pipeline_should_run {
-            let port = nanoleaf::enable_external_control(&n_cfg.ip, &n_cfg.auth_token)?;
-            let streamer = NanoleafUdpStreamer::new(&n_cfg.ip, port, sampler.panel_ids())?;
-            info!(
-                "[+] Nanoleaf 4D streaming ready: {} perimeter segments on UDP port {}",
-                streamer.panel_count(),
-                port
-            );
-            Some(streamer)
+            match nanoleaf::enable_external_control(&n_cfg.ip, &n_cfg.auth_token)
+                .and_then(|port| NanoleafUdpStreamer::new(&n_cfg.ip, port, sampler.panel_ids())) {
+                Ok(streamer) => {
+                    info!("Nanoleaf 4D streaming ready: {} segments", streamer.panel_count());
+                    Some(streamer)
+                }
+                Err(error) => {
+                    warn!("Nanoleaf unavailable at start; keeping other outputs running: {error}");
+                    None
+                }
+            }
         } else {
             None
         };
@@ -619,7 +627,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         config.saturation_boost, config.noise_gate_threshold, config.gamma,
         config.peak_weight, config.rise_smoothing_factor, config.fall_smoothing_factor,
         config.strict_blackout, config.max_color_step, config.hdr_tone_mapping,
-        config.letterbox_detection,
+        config.letterbox_detection, config.spatial_blend,
     );
     let mut drm_router = DrmCaptureRouter::default();
     drm_router.set_mode(config.capture_mode);
@@ -812,9 +820,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
         // 1. Check for web UI or external stop requests
         let web_stop_requested = pending_commands.take_stop_if_running(pipeline_state);
-        let mut external_stop = false;
-
-        // Periodically verify if the user stopped sync from the official Hue mobile app (every 5s)
+        // Hue external control affects only Hue, never WLED or Nanoleaf.
+        // Periodically verify the Hue Entertainment Area ownership (every 5s)
         if last_status_check.elapsed() >= Duration::from_secs(5) {
             last_status_check = tokio::time::Instant::now();
             if hue_active && hue_sync_enabled && hue_dtls.is_some() {
@@ -826,23 +833,22 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         config.hue_bridge_certificate_sha256.as_deref(),
                     ) {
                         if !state.active {
-                            external_stop = true;
+                            hue_sync_enabled = false;
+                            hue_dtls = None;
+                            shared_state.hue_connected.store(false, Ordering::Relaxed);
+                            info!("Hue external stream stopped; WLED/Nanoleaf remain active");
                         }
-                        if let Some(ref mut s) = hue_sampler {
-                            s.set_smoothing_factor(state.smoothing_factor);
-                        }
-                        if let Some(ref mut ns) = nanoleaf_sampler {
-                            ns.set_smoothing_factor(state.smoothing_factor);
-                        }
+                        // The Hue app's smoothing preference is device-specific.
+                        // Do not apply it as a second processing pass to all vendors.
                     }
                 }
             }
         }
 
-        if web_stop_requested || external_stop || pipeline_state == PipelineState::Paused {
+        if web_stop_requested || pipeline_state == PipelineState::Paused {
             info!(
-                "Sync was stopped/paused (web={}, external={}). Entering paused idle state...",
-                web_stop_requested, external_stop
+                "Sync was stopped/paused (web={}). Entering paused idle state...",
+                web_stop_requested
             );
             shared_state.is_syncing.store(false, Ordering::SeqCst);
             pipeline_state = PipelineState::Paused;
@@ -972,7 +978,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         }
                     }
 
-                    if !hue_resumed {
+                    if !hue_resumed
+                        && !(config.wled_sync_enabled && !wled_outputs.is_empty())
+                        && !(nanoleaf_active && nanoleaf_sync_enabled)
+                    {
                         shared_state.is_syncing.store(false, Ordering::SeqCst);
                         continue;
                     }
@@ -1094,7 +1103,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 live_st.peak_weight, live_st.rise_smoothing_factor,
                 live_st.fall_smoothing_factor, live_st.strict_blackout,
                 live_st.max_color_step, live_st.hdr_tone_mapping,
-                live_st.letterbox_detection,
+                live_st.letterbox_detection, live_st.spatial_blend,
             );
             output_gate.clear();
             if let Some(ref mut s) = hue_sampler {
@@ -1848,8 +1857,11 @@ mod tests {
     #[test]
     fn duplicate_output_frames_are_suppressed_but_meaningful_changes_pass() {
         let previous = vec![RgbColor::new(10, 20, 30)];
-        assert!(!colors_changed(&previous, &previous));
-        assert!(colors_changed(&previous, &[RgbColor::new(13, 20, 30)]));
+        let mut gate = OutputGate::default();
+        assert!(gate.should_send("hue", &previous, true));
+        gate.record("hue", &previous);
+        assert!(!gate.should_send("hue", &previous, true));
+        assert!(gate.should_send("hue", &[RgbColor::new(13, 20, 30)], true));
     }
 
     #[test]
