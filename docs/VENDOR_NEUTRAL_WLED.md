@@ -4,6 +4,80 @@ Branch: feature/vendor-neutral-wled-drm-first
 Base: adeze/lg-hue-sync v0.6.1
 Reference: user-supplied HyperDRM-main.zip (HyperDRM 0.13.0)
 
+## One shared colour-processing pipeline
+
+This feature branch now uses one `ColorPipeline` (`src/color/pipeline.rs`)
+and one `OutputFanout` (`src/main.rs`) for normal and DRM-first playback.
+
+```text
+               LG webOS media resources
+                      |
+             DRM-first source router
+                /             \
+       Frame capture       LG histogram
+           |                   |
+    RGBA/BGRA pixels       16 RGB region means
+                \             /
+                 ColorPipeline
+      32 x 18 spatial field, one shared state
+      saturation, highlight weighting, noise gate,
+      gamma, optional legacy midtone lift, time-based
+      smoothing, scene cuts and optional spatial blend
+                         |
+                     ColorField
+                  source + RGB grid
+                         |
+                     OutputFanout
+            /             |             \
+       WLED adapter   Hue adapter   Nanoleaf adapter
+       LED positions  Hue V2 zones  physical panel IDs
+       brightness     Hue colour    brightness
+       DRGB/DNRGB     DTLS + auth   UDP + controller auth
+```
+
+The output adapters do **not** call any old raw-image sampler. They only
+map colours from the processed field and apply final vendor brightness trims.
+The frame pipeline samples RGBA/BGRA into a 32x18 field once. Histogram
+processing uses the source's region calibration and projects colours to that
+same field; unknown TVs continue to use one uniform mean colour. A 32x18
+representation does not preserve every pixel or recover information absent
+from 16 histogram regions.
+
+The active daemon no longer calls Hue's `ZoneSampler::sample_frame`,
+Nanoleaf's `NanoleafPerimeterSampler::sample_frame` or WLED's
+`PerimeterSampler::sample_frame`. Legacy sampler definitions remain in
+the source for compatibility, diagnostics and older tests; they are not an
+additional live processing pass. Colour settings are tuned centrally via
+the existing dashboard's `LiveSettings`.
+
+`OutputGate` suppresses near-identical per-device frames while retaining
+a 500ms heartbeat, records only locally successful sends and clears after
+scene changes, settings changes and source transitions. Each adapter can
+reconnect independently. Stopping Hue through the official Hue app no
+longer stops WLED or Nanoleaf, and failed Hue/Nanoleaf initialization does
+not fail the whole WLED daemon.
+
+This is an **internal Rust API**, not a public RGB streaming socket. The
+existing unauthenticated LAN dashboard remains on port 8088; its read-only
+`GET /api/outputs` exposes adapter state, not video pixels or protected
+content. Future vendors should implement `LightOutput` with their own
+geometry/transport adapter, without writing another colour-processing path.
+
+### New source tests
+
+- `src/color/pipeline.rs`: uniform pixels, colour-source handover, bilinear
+  sampling and malformed-buffer rejection
+- `src/output/mod.rs`: the same histogram field mapped to WLED, Hue and
+  Nanoleaf; output brightness trims independent of shared processing
+- `src/output/gate.rs`: independent per-device frame suppression and reset
+- `src/output/wled.rs`: DRGB/DNRGB segmentation boundaries
+
+The new Rust tests have **not been executed here**, because this environment
+has no Rust compiler, Cargo, rustfmt or ARMv7 cross-compiler. Also, the fork
+currently reports no GitHub Actions workflow runs. The CI gates below must
+pass before deploying to an actual TV. In particular, native histogram ABI
+and LG DRM behaviour are still unverified on the target model.
+
 ## Implemented in the feature branch
 
 - Normal frame capture remains based on the existing libvtcapture / DILE_VT code.
