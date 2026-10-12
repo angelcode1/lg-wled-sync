@@ -46,7 +46,6 @@ type Preset = unsafe extern "C" fn(*mut c_void, i32) -> i32;
 type Get = unsafe extern "C" fn(*mut c_void, *mut NativeHistogram) -> i32;
 type Finish = unsafe extern "C" fn(*mut c_void) -> i32;
 
-
 // LG's C++ libvtcapture can throw std::runtime_error when LS2 registration
 // fails. Direct calls across the Rust FFI boundary terminate the process.
 // Keep native exceptions inside a narrow C++ wrapper compiled for Linux.
@@ -129,11 +128,7 @@ unsafe fn guarded_preset(preset: Preset, handle: *mut c_void, value: i32) -> Res
     }
 }
 
-unsafe fn guarded_get(
-    get: Get,
-    handle: *mut c_void,
-    records: *mut NativeHistogram,
-) -> Result<i32> {
+unsafe fn guarded_get(get: Get, handle: *mut c_void, records: *mut NativeHistogram) -> Result<i32> {
     #[cfg(target_os = "linux")]
     {
         let mut error = [0; LG_ERROR_LEN];
@@ -155,9 +150,8 @@ unsafe fn guarded_finish(finish: Finish, handle: *mut c_void) -> Result<i32> {
     #[cfg(target_os = "linux")]
     {
         let mut error = [0; LG_ERROR_LEN];
-        let status = unsafe {
-            lg_histogram_finish_guarded(finish, handle, error.as_mut_ptr(), error.len())
-        };
+        let status =
+            unsafe { lg_histogram_finish_guarded(finish, handle, error.as_mut_ptr(), error.len()) };
         if let Some(message) = native_exception(&error) {
             bail!("LG native finalize exception: {message}");
         }
