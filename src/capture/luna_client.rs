@@ -10,7 +10,12 @@ use tokio::process::Command;
 
 /// Make one private-bus request without blocking the calling capture loop.
 /// stdout is capped; no shell interpretation, TV writes, or service restarts.
-pub async fn request(uri: &str, payload: &str, timeout: Duration, max_bytes: usize) -> Option<Value> {
+pub async fn request(
+    uri: &str,
+    payload: &str,
+    timeout: Duration,
+    max_bytes: usize,
+) -> Option<Value> {
     let mut command = Command::new("luna-send");
     command.args(["-i", "-f", uri, payload]);
     read_interactive_reply(&mut command, timeout, max_bytes).await
@@ -101,17 +106,24 @@ mod tests {
     async fn bounded_timeout_reaps_silent_child() {
         let mut command = Command::new("sh");
         command.args(["-c", "read unused"]);
-        assert!(read_interactive_reply(&mut command, Duration::from_millis(100), 1024)
-            .await
-            .is_none());
+        assert!(
+            read_interactive_reply(&mut command, Duration::from_millis(100), 1024)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn oversized_reply_is_rejected() {
         let mut command = Command::new("sh");
-        command.args(["-c", r#"printf '%s' '{"large":"01234567890123456789"}'; read unused"#]);
-        assert!(read_interactive_reply(&mut command, Duration::from_secs(2), 12)
-            .await
-            .is_none());
+        command.args([
+            "-c",
+            r#"printf '%s' '{"large":"01234567890123456789"}'; read unused"#,
+        ]);
+        assert!(
+            read_interactive_reply(&mut command, Duration::from_secs(2), 12)
+                .await
+                .is_none()
+        );
     }
 }

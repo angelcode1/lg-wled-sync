@@ -3,9 +3,9 @@
 //! Only a foreground media/VDEC pipeline without secure resources is clear.
 //! HDMI, idle, unrecognised envelopes and failed Luna calls remain unknown.
 use super::drm_routing::PlaybackClass;
+use crate::capture::luna_client;
 use serde_json::Value;
 use std::time::Duration;
-use crate::capture::luna_client;
 
 pub fn classify(value: &Value) -> PlaybackClass {
     let Some(pipelines) = value.as_array() else {
@@ -62,7 +62,9 @@ pub async fn query() -> PlaybackClass {
         "{}",
         Duration::from_millis(2300),
         128 * 1024,
-    ).await else {
+    )
+    .await
+    else {
         return PlaybackClass::Unknown;
     };
     classify(&reply)
@@ -95,7 +97,8 @@ pub async fn query_tv_model() -> Option<String> {
         r#"{"keys":["modelName"]}"#,
         Duration::from_millis(2300),
         8192,
-    ).await?;
+    )
+    .await?;
     parse_model_reply(&reply.to_string())
 }
 
@@ -125,7 +128,9 @@ mod tests {
     #[test]
     fn exact_c5_model_and_hdmi_pipeline_fixture() {
         assert_eq!(
-            parse_model_reply(r#"{"returnValue":true,"modelName":"OLED42C5PSA.AAUQLJD","sdkVersion":"10.0.0"}"#),
+            parse_model_reply(
+                r#"{"returnValue":true,"modelName":"OLED42C5PSA.AAUQLJD","sdkVersion":"10.0.0"}"#
+            ),
             Some("OLED42C5PSA.AAUQLJD".to_string())
         );
         let hdmi = json!([
