@@ -1549,12 +1549,12 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     None
                 } else {
                     match color_pipeline.histogram(&regions, &config.histogram) {
-                    Ok(field) => Some(field),
-                    Err(error) => {
-                        warn!("Rejected invalid histogram colour field: {error:#}");
-                        None
+                        Ok(field) => Some(field),
+                        Err(error) => {
+                            warn!("Rejected invalid histogram colour field: {error:#}");
+                            None
+                        }
                     }
-                }
                 }
             } else {
                 None

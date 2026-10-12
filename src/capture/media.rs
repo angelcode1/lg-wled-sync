@@ -78,7 +78,6 @@ pub async fn query() -> PlaybackClass {
     classify(&value)
 }
 
-
 const MODEL_URI: &str = "luna://com.webos.service.tv.systemproperty/getSystemInfo";
 
 pub fn parse_model_reply(raw: &str) -> Option<String> {
@@ -88,8 +87,12 @@ pub fn parse_model_reply(raw: &str) -> Option<String> {
         return None;
     }
     let model = object.get("modelName")?.as_str()?;
-    if model.is_empty() || model.len() > 63
-        || !model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ')) {
+    if model.is_empty()
+        || model.len() > 63
+        || !model
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' '))
+    {
         return None;
     }
     Some(model.to_string())
@@ -101,7 +104,9 @@ pub async fn query_tv_model() -> Option<String> {
     command.args(["-n", "1", MODEL_URI, r#"{"keys":["modelName"]}"#]);
     command.kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_millis(850), command.output())
-        .await.ok()?.ok()?;
+        .await
+        .ok()?
+        .ok()?;
     if !output.status.success() || output.stdout.len() > 8192 {
         return None;
     }
@@ -114,11 +119,22 @@ mod tests {
     use serde_json::json;
     #[test]
     fn model_reply_must_be_exact_and_successful() {
-        assert_eq!(parse_model_reply(r#"{"returnValue":true,"modelName":"OLED65C5PSA"}"#),
-            Some("OLED65C5PSA".to_string()));
-        assert_eq!(parse_model_reply("info\n{\"returnValue\":false,\"modelName\":\"OLED65C5PSA\"}"), None);
-        assert_eq!(parse_model_reply(r#"{"returnValue":true,"modelName":"OLED65C5PSA"} trailing"#), None);
-        assert_eq!(parse_model_reply(r#"{"returnValue":true,"modelName":"INVALID/TV"}"#), None);
+        assert_eq!(
+            parse_model_reply(r#"{"returnValue":true,"modelName":"OLED65C5PSA"}"#),
+            Some("OLED65C5PSA".to_string())
+        );
+        assert_eq!(
+            parse_model_reply("info\n{\"returnValue\":false,\"modelName\":\"OLED65C5PSA\"}"),
+            None
+        );
+        assert_eq!(
+            parse_model_reply(r#"{"returnValue":true,"modelName":"OLED65C5PSA"} trailing"#),
+            None
+        );
+        assert_eq!(
+            parse_model_reply(r#"{"returnValue":true,"modelName":"INVALID/TV"}"#),
+            None
+        );
     }
     #[test]
     fn valid_clear_requires_foreground_media_decoder() {

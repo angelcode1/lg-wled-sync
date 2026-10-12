@@ -274,7 +274,9 @@ impl Default for HistogramSettings {
 fn valid_model_name(model: &str) -> bool {
     !model.is_empty()
         && model.len() <= 63
-        && model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' '))
+        && model
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' '))
 }
 
 impl HistogramSettings {
@@ -283,13 +285,19 @@ impl HistogramSettings {
     pub fn matches_tv_model(&self, current: Option<&str>) -> bool {
         match self.profile {
             Profile::Average => true,
-            Profile::Custom => self.model.as_deref().zip(current)
+            Profile::Custom => self
+                .model
+                .as_deref()
+                .zip(current)
                 .is_some_and(|(expected, actual)| expected == actual),
             Profile::G4 => current.is_some_and(|m| {
                 let bytes = m.as_bytes();
-                bytes.len() >= 8 && bytes.starts_with(b"OLED")
-                    && bytes[4].is_ascii_digit() && bytes[5].is_ascii_digit()
-                    && bytes[6] == b'G' && bytes[7] == b'4'
+                bytes.len() >= 8
+                    && bytes.starts_with(b"OLED")
+                    && bytes[4].is_ascii_digit()
+                    && bytes[5].is_ascii_digit()
+                    && bytes[6] == b'G'
+                    && bytes[7] == b'4'
             }),
         }
     }
@@ -307,7 +315,9 @@ impl HistogramSettings {
             }
             // Reject partially mapped rims; a complete wizard measurement
             // provides at least one calibrated point per screen edge.
-            let edges: std::collections::BTreeSet<u8> = self.points.iter()
+            let edges: std::collections::BTreeSet<u8> = self
+                .points
+                .iter()
                 .map(|p| p.position.floor() as u8)
                 .collect();
             if edges != [0, 1, 2, 3].into_iter().collect() {
@@ -401,8 +411,13 @@ mod tests {
     use super::*;
     #[test]
     fn spatial_mapping_requires_exact_tv_model_and_four_edges() {
-        let points = [0.25, 1.25, 2.25, 3.25].into_iter().enumerate()
-            .map(|(i, position)| RimPoint { position, region: i as u8 })
+        let points = [0.25, 1.25, 2.25, 3.25]
+            .into_iter()
+            .enumerate()
+            .map(|(i, position)| RimPoint {
+                position,
+                region: i as u8,
+            })
             .collect();
         let cfg = HistogramSettings {
             profile: Profile::Custom,
@@ -419,7 +434,10 @@ mod tests {
         different.model = Some("OLED65C5PSA".to_string());
         different.points.pop();
         assert!(!different.validate());
-        let g4 = HistogramSettings { profile: Profile::G4, ..Default::default() };
+        let g4 = HistogramSettings {
+            profile: Profile::G4,
+            ..Default::default()
+        };
         assert!(!g4.matches_tv_model(Some("OLED65C5PSA")));
         assert!(g4.matches_tv_model(Some("OLED65G4PSA")));
         assert!(HistogramSettings::default().matches_tv_model(None));
