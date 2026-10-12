@@ -558,6 +558,90 @@ or to alter HDCP is justified by these role files.
 Any future role should use the actual stable installed executable
 path and only registration names shown to be required.
 
+## 2026-10-13: offline native ARM32 library disassembly (no TV execution)
+
+The owner supplied a **private** tarball containing the exact installed
+ELF32 ARM soft-float libraries:
+
+| Library | ELF BuildID (SHA-1 build identity) |
+|---|---|
+| `libvtcapture.so.1.0.0` | `9fb5e56d59c29ed242c0e4a66015c71601a4657e` |
+| `libresource_mgr_client.so.1.0.0` | `c33db0a8fa20446e45ad4f03b495ff9e3929f722` |
+
+Both were inspected offline with `readelf`, `strings` and LLVM's
+**Thumb-v7** disassembler. Most of `libvtcapture` uses Thumb instructions
+(symbol entry points have odd addresses); a naive ARM-mode disassembly
+gives **incorrect instructions**.
+
+### Confirmed code-level registration chain
+
+- `LS2Interface::attach(_GMainLoop*)` at `0x0000d558`
+  calls `LS2ServiceBase::attach(_GMainLoop*)` through PLT at
+  `0x0000d56a`.
+- `LS2ServiceBase::attach` at `0x0000bab4`
+  obtains the service name from a virtual method and calls
+  **`LSRegister`** through the PLT at `0x0000bada`.
+  The PLT entry at `0x9414` resolves through the ARM relocation table
+  to `LSRegister`. (The adjacent entry at `0x9408` is *not*
+  `LSRegister` and must not be confused with it.)
+- `LS2Interface::makeServiceName` at `0x0000daec` constructs a
+  name using the literal
+  `com.webos.service.capture.client` at `0x0001afdc`,
+  opens `/dev/urandom`, reads four bytes and reduces a generated
+  numeric value modulo `10000`. It formats the numeric suffix as
+  decimal text. The expected registered family is therefore
+  **`com.webos.service.capture.client*`**, matching the actual
+  allowedNames in LG's `vtCaptureTestSuite` role.
+  The specific suffix varies and **must not be hardcoded**.
+- The capture library also creates `ResourceManagerClient` instances;
+  the separate `libresource_mgr_client` includes
+  `com.webos.rm.client.` as a literal. The *observed* C5 Resource
+  Manager bus clients have generated suffixes, aligning with the
+  `com.webos.rm.client.*` test-suite role wildcard.
+
+**Important diagnostic correction:** `LSRegisterPubPriv FAILED` is
+**not present as a literal string in either uploaded library**. The
+two binaries therefore do not prove which function threw the observed
+C++ exception. `libresource_mgr_client` dynamically depends on
+`libums_connector.so.1` and imports
+`UMSConnector::UMSConnector(..., UMSConnectorBusType, bool)`.
+It is plausible that the Resource Manager's UMS connector produces the
+exception during its own bus registration, instead of (or in addition
+to) `libvtcapture`'s direct `LSRegister` call. **Do not call
+the direct capture-client role mismatch the definitive root cause yet.**
+
+Next offline library to request, if needed:
+`/usr/lib/libums_connector.so.1` (and the real symlink target).
+Inspect its `LSRegisterPubPriv FAILED` string and its registration
+constructor path. Do not publish its vendor binary.
+
+**Remaining limits:** No call parameters or return status were
+recorded in the original native crash. The role for our actual
+`/var/home/root/c5-histogram-probe` executable is absent from
+the inspected capture manifest, but other roles/policies have not
+been exhaustively ruled out. Neither the bus registration outcome
+nor LG's later whitelist/security-video checks have been validated
+on this standalone probe. Native DRM refusal must remain intact.
+
+### Safe offline next step
+
+```sh
+# Copy only: does not run any library code on the TV.
+ssh root@192.168.8.184 \
+  'ls -l /usr/lib/libums_connector.so.1; readlink -f /usr/lib/libums_connector.so.1'
+scp -O root@192.168.8.184:/usr/lib/libums_connector.so.1 \
+  ~/Downloads/c5-native-libs/libums_connector.so.1
+
+GSTRINGS="$(brew --prefix binutils)/bin/gstrings"
+"$GSTRINGS" -a ~/Downloads/c5-native-libs/libums_connector.so.1 \
+  | grep -iE -C 3 'LSRegisterPubPriv|LSRegister|invalid permissions|UMSConnector' \
+  | head -110
+```
+
+No action to edit LS2 policy, restart the Luna hub, force native
+capture or bypass secure-video refusal is warranted before this
+exception's origin is understood.
+
 ## Build and download
 
 GitHub Actions on the `feature/vendor-neutral-wled-drm-first` branch runs
