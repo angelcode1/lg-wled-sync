@@ -683,6 +683,46 @@ proprietary vendor binaries into Git, grant broad LS2 roles, or restart
 the hub for this diagnostic. The capture service's DRM refusal policies
 must remain intact.
 
+## 2026-10-13: exact LSRegisterPubPriv exception found in UMS connector
+
+The owner searched the copied C5
+`~/Downloads/c5-native-libs/libums_connector.so.1` with a narrow
+`LSRegister` expression (no `head` truncation). The output includes:
+
+```text
+LSRegisterPubPriv
+LSRegister
+LSRegisterPalmService
+SERVICE_REGISTER_ERR
+LSRegisterPubPriv FAILED for name=%s !!
+LSRegisterPubPriv FAILED
+LSRegister FAILED for name=%s !!
+LSRegister FAILED
+```
+
+This is the **first identified vendor library containing the exact
+observed exception text**, `LSRegisterPubPriv FAILED`. The
+`libresource_mgr_client.so.1` library imports the UMSConnector
+constructor, providing a plausible native call chain. The output
+does not reveal the failed name, registration bus, or decisive C++
+throw call site; a string's presence alone cannot prove that
+particular execution path was taken.
+
+The same UMS library also refers to
+`libums_connector_impl.so.1`. Because the exact error already
+occurs in the copied `libums_connector.so.1`, prioritise
+**its** exception cross-references and `LSRegisterPubPriv` call
+in offline ARM32/Thumb disassembly. Then determine the
+`UMSConnectorBusType` used by ResourceManagerClient. Avoid
+assigning `["all"]` or guessing LS2 roles.
+
+The last pasted `scp` for `libums_connector_impl.so.1` ended
+with a trailing backslash and no destination or successful-copy
+confirmation. Its copy status is unknown. The existing
+`libums_connector.so.1` alone is enough for the next offline step;
+privately attach it in this conversation rather than committing
+vendor files to GitHub. The C5 histogram and DRM paths remain untested.
+
 ## Build and download
 
 GitHub Actions on the `feature/vendor-neutral-wled-drm-first` branch runs
