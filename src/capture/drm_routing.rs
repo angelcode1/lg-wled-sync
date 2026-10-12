@@ -1,12 +1,14 @@
 //! DRM-first source policy. This is deliberately independent from LG's unverified
 //! histogram native ABI and from the eventual media-pipeline classifier.
 use std::time::{Duration, Instant};
+use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackClass { Protected, Clear, Unknown }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptureMode { AutoDrmFirst, FrameOnly, HistogramOnly }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureMode { #[default] AutoDrmFirst, FrameOnly, HistogramOnly }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistogramHealth { Valid, NotReady }

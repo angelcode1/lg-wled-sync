@@ -67,6 +67,7 @@ impl PerimeterSampler {
             active: ActiveRect::default(), frames: 0, last: None,
         }
     }
+    pub fn screen_positions(&self) -> &[Point] { &self.points }
     pub fn sample_frame(&mut self, data: &[u8], width: u32, height: u32, bgra: bool,
         letterbox: bool) -> Option<Vec<RgbColor>> {
         let w=usize::try_from(width).ok()?;

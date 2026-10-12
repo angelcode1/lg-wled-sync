@@ -207,6 +207,12 @@ pub struct Config {
     pub wled_sync_enabled: bool,
     #[serde(default)]
     pub wled_devices: Vec<WledConfig>,
+    /// Auto prefers LG histogram for detected secure video, frame capture otherwise.
+    #[serde(default)]
+    pub capture_mode: crate::capture::drm_routing::CaptureMode,
+    /// Histogram spatial calibration; unknown TVs use uniform average by default.
+    #[serde(default)]
+    pub histogram: crate::capture::histogram::HistogramSettings,
     #[serde(default = "default_fps")]
     pub fps: u32,
     #[serde(default = "default_brightness")]
@@ -371,6 +377,12 @@ impl Config {
                 reason: "capture dimensions must fit within 4096 per side and 4K pixels",
             });
         }
+        if !self.histogram.validate() {
+            return Err(ConfigError::Invalid {
+                path: path.to_path_buf(),
+                reason: "invalid histogram calibration points/profile",
+            });
+        }
         for device in &self.wled_devices {
             if device.enabled && (device.ip.trim().is_empty()
                 || device.udp_port == 0
@@ -401,6 +413,8 @@ impl Config {
             nanoleaf_sync_enabled: true,
             wled_sync_enabled: true,
             wled_devices: Vec::new(),
+            capture_mode: crate::capture::drm_routing::CaptureMode::AutoDrmFirst,
+            histogram: crate::capture::histogram::HistogramSettings::default(),
             fps: default_fps(),
             brightness_multiplier: default_brightness(),
             hue_output_brightness: default_output_trim(),
