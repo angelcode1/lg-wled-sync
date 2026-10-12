@@ -66,6 +66,9 @@ impl WledUdpStreamer {
 impl LightOutput for WledUdpStreamer {
     fn kind(&self) -> &'static str { "wled-udp" }
     fn send(&mut self, frame: &LightFrame<'_>) -> Result<()> {
+        // Explicitly consume provenance while preserving an identical WLED
+        // wire protocol for real frames and histogram-derived colour values.
+        let _source = frame.source;
         if frame.colors.len() != self.count {
             return Err(Error::new(ErrorKind::InvalidInput, "WLED colour count mismatch").into());
         }
