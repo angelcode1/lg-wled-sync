@@ -474,6 +474,90 @@ This read-only test does not initialise VT capture, call
 do not recreate it for a permissions experiment. Do not assume that
 approving a caller for Luna makes protected HDMI histograms available.
 
+## 2026-10-13: LG native test-suite role confirms a separate client model
+
+The owner supplied the contents of the additional installed role files,
+completing the manifest's capture-test-suite reference:
+
+`/usr/share/luna-service2/roles.d/com.webos.service.capture.testsuite.role.json`:
+
+```json
+{
+  "exeName": "/usr/bin/vtCaptureTestSuite",
+  "type": "regular",
+  "allowedNames": [
+    "com.webos.service.capture.testsuite.*",
+    "com.webos.service.capture.client*",
+    "com.webos.rm.client.*"
+  ],
+  "permissions": [
+    {
+      "service": "com.webos.service.capture.testsuite.*",
+      "outbound": ["*"]
+    },
+    {
+      "service": "com.webos.service.capture.client*",
+      "outbound": ["*"]
+    },
+    {
+      "service": "com.webos.rm.client.*",
+      "outbound": ["com.webos.media"]
+    }
+  ]
+}
+```
+
+This is an installed example of a **regular role for a separate test
+executable**; it does not require changing or impersonating the vendor
+`/usr/sbin/captureservice` role. It makes a standalone role tied to
+our eventual stable executable path a plausible LS2 integration
+solution. Actual native registration names and the cause of
+`LSRegisterPubPriv FAILED` remain unverified.
+
+The older `avcaptureinf-test` roles are for
+`/opt/webos/tests/avcaptureinf/gtest-avcaptureinf`.
+Its **private** role allows wildcard names `"*"` and wildcard
+inbound/outbound permissions, while its public role allows
+`gtest-avcaptureinf`; its manifest
+`avcaptureinf.manifest.json` registers those two old-format roles.
+**Do not copy these wildcard grants** into our application.
+
+### Next: prove what the library registers (read-only)
+
+First collect local filename and native symbol evidence, without
+starting the vendor tests or changing the TV:
+
+```sh
+ssh root@192.168.8.184 'sh -s' <<'TV'
+echo '===== installed LG native test executable ====='
+ls -l /usr/bin/vtCaptureTestSuite 2>&1 || true
+echo '===== current root capture probe ====='
+ls -l /var/home/root/c5-histogram-probe
+echo '===== marker remains absent ====='
+ls -l /var/luna/preferences/vt_devmode 2>&1 || true
+echo '===== capture registration log availability ====='
+for f in /var/log/messages /var/log/ls-hubd.log /var/log/syslog; do
+  [ -f "$f" ] && ls -l "$f"
+done
+TV
+
+GSTRINGS="$(brew --prefix binutils)/bin/gstrings"
+"$GSTRINGS" -a ~/Downloads/c5-native-libs/libvtcapture.so.1.0.0 \
+  | grep -iE -C 4 \
+    'com[.]webos[.]service[.]capture[.]client|com[.]webos[.]rm[.]client|hue_sync_service|service name :|LSRegister' \
+  | head -140
+```
+
+The string snippets are hints, not proof of the full LS2 name passed to
+`LSRegister`; confirming the exact caller requires analysis of the
+installed vendor library's instruction-level call site, or a narrowly
+scoped native registration diagnostic. No request to `setPermission`
+or to alter HDCP is justified by these role files.
+
+**Do not deploy a guessed LS2 role or retry histogram capture yet.**
+Any future role should use the actual stable installed executable
+path and only registration names shown to be required.
+
 ## Build and download
 
 GitHub Actions on the `feature/vendor-neutral-wled-drm-first` branch runs
