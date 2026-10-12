@@ -79,6 +79,64 @@ No system service restart, role change or HDCP modification is
 needed for these checks. Inspect any security-relevant file contents
 locally before sharing them.
 
+## Verified crash aftermath: developer marker survived (C5)
+
+The owner subsequently observed
+`/var/luna/preferences/vt_devmode` as a zero-byte, root-owned file
+with mode `0600` and a creation timestamp matching the 21:41 probe;
+the marker was absent in the preflight. No competing capture process
+appeared in `ps`. Therefore the original guardian **did not complete
+cleanup after the native abort**. We cannot determine from this evidence
+whether the guardian was killed with the SSH process group or failed for
+another reason.
+
+New startup policy in the fork: **reject any pre-existing marker**,
+including a possibly stale one, instead of reusing it and silently
+proceeding. The guardian calls `setsid()` in the forked child before
+waiting for the parent pipe to close; this reduces the chance that an
+SSH process-group teardown kills cleanup. It remains best-effort, not a
+guarantee against process/cgroup kills, kernel failures or driver aborts.
+
+Only after confirming that **no** capture owners are active, an operator
+may remove the *specific* leftover marker if its owner, mode, type,
+size and provenance match the observed failed probe. Never remove an
+unknown or actively owned marker as a blanket workaround. The safe
+manual cleanup is limited to:
+
+```sh
+ssh root@192.168.8.184 'sh -s' <<'TV'
+set -eu
+p=/var/luna/preferences/vt_devmode
+active="$(ps | grep -Ei 'piccap|hyperdrm|histogramhyperion|lg-hue-sync|c5-histogram-probe' | grep -v grep || true)"
+if [ -n "$active" ]; then
+  echo "$active"
+  echo 'ABORT: possible capture owner running'
+  exit 1
+fi
+if [ ! -e "$p" ]; then
+  echo 'marker already absent'
+  exit 0
+fi
+ls -l "$p"
+if [ ! -f "$p" ] || [ -L "$p" ] ||
+   [ "$(stat -c %u "$p")" != 0 ] ||
+   [ "$(stat -c %s "$p")" != 0 ] ||
+   [ "$(stat -c %a "$p")" != 600 ]; then
+  echo 'ABORT: marker does not match the failed probe'
+  exit 1
+fi
+rm -- "$p"
+test ! -e "$p" && echo STALE_MARKER_CLEARED
+TV
+```
+
+The Mac's previously downloaded
+`~/Downloads/libvtcapture.so.1.0.0` was later missing. This is not a
+C5 library issue: `/usr/lib/libvtcapture.so.1.0.0` was confirmed to exist
+on the TV and can be recopied read-only. Use a dedicated local directory
+so downloaded LG binaries are not confused with cross-build artifacts.
+Keep vendor binaries local; share selected `gstrings` output instead.
+
 ## Build and download
 
 GitHub Actions on the `feature/vendor-neutral-wled-drm-first` branch runs
