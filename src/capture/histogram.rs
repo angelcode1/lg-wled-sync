@@ -46,6 +46,129 @@ type Preset = unsafe extern "C" fn(*mut c_void, i32) -> i32;
 type Get = unsafe extern "C" fn(*mut c_void, *mut NativeHistogram) -> i32;
 type Finish = unsafe extern "C" fn(*mut c_void) -> i32;
 
+
+// LG's C++ libvtcapture can throw std::runtime_error when LS2 registration
+// fails. Direct calls across the Rust FFI boundary terminate the process.
+// Keep native exceptions inside a narrow C++ wrapper compiled for Linux.
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn lg_histogram_init_guarded(
+        init: Init,
+        callback: extern "C" fn() -> bool,
+        error: *mut libc::c_char,
+        cap: usize,
+    ) -> *mut c_void;
+    fn lg_histogram_preset_guarded(
+        preset: Preset,
+        handle: *mut c_void,
+        value: i32,
+        error: *mut libc::c_char,
+        cap: usize,
+    ) -> i32;
+    fn lg_histogram_get_guarded(
+        get: Get,
+        handle: *mut c_void,
+        records: *mut NativeHistogram,
+        error: *mut libc::c_char,
+        cap: usize,
+    ) -> i32;
+    fn lg_histogram_finish_guarded(
+        finish: Finish,
+        handle: *mut c_void,
+        error: *mut libc::c_char,
+        cap: usize,
+    ) -> i32;
+}
+
+#[cfg(target_os = "linux")]
+const LG_ERROR_LEN: usize = 192;
+
+#[cfg(target_os = "linux")]
+fn native_exception(error: &[libc::c_char; LG_ERROR_LEN]) -> Option<String> {
+    let end = error.iter().position(|&b| b == 0).unwrap_or(error.len());
+    if end == 0 {
+        return None;
+    }
+    let bytes: Vec<u8> = error[..end].iter().map(|&b| b as u8).collect();
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+unsafe fn guarded_init(init: Init) -> Result<*mut c_void> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut error = [0; LG_ERROR_LEN];
+        let handle = unsafe {
+            lg_histogram_init_guarded(init, policy_revoked, error.as_mut_ptr(), error.len())
+        };
+        if let Some(message) = native_exception(&error) {
+            bail!("LG native init exception: {message}");
+        }
+        Ok(handle)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(unsafe { init(policy_revoked) })
+    }
+}
+
+unsafe fn guarded_preset(preset: Preset, handle: *mut c_void, value: i32) -> Result<i32> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut error = [0; LG_ERROR_LEN];
+        let status = unsafe {
+            lg_histogram_preset_guarded(preset, handle, value, error.as_mut_ptr(), error.len())
+        };
+        if let Some(message) = native_exception(&error) {
+            bail!("LG native preset exception: {message}");
+        }
+        Ok(status)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(unsafe { preset(handle, value) })
+    }
+}
+
+unsafe fn guarded_get(
+    get: Get,
+    handle: *mut c_void,
+    records: *mut NativeHistogram,
+) -> Result<i32> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut error = [0; LG_ERROR_LEN];
+        let status = unsafe {
+            lg_histogram_get_guarded(get, handle, records, error.as_mut_ptr(), error.len())
+        };
+        if let Some(message) = native_exception(&error) {
+            bail!("LG native sampling exception: {message}");
+        }
+        Ok(status)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(unsafe { get(handle, records) })
+    }
+}
+
+unsafe fn guarded_finish(finish: Finish, handle: *mut c_void) -> Result<i32> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut error = [0; LG_ERROR_LEN];
+        let status = unsafe {
+            lg_histogram_finish_guarded(finish, handle, error.as_mut_ptr(), error.len())
+        };
+        if let Some(message) = native_exception(&error) {
+            bail!("LG native finalize exception: {message}");
+        }
+        Ok(status)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(unsafe { finish(handle) })
+    }
+}
+
 pub struct HistogramCapture {
     handle: *mut c_void,
     get: Get,
@@ -187,21 +310,33 @@ impl HistogramCapture {
             let finish: Finish = *library.get(b"vtCapture_finalizeHistogram\0")?;
             REVOKED.store(false, Ordering::SeqCst);
             let mut marker = MarkerGuard::begin()?;
-            let handle = init(policy_revoked);
+            // Always clean up the temporary developer marker, even when a
+            // native C++ exception is returned as a Rust error.
+            let init_result = guarded_init(init);
             if let Some(guard) = marker.as_mut() {
                 if let Err(error) = guard.finish() {
-                    if !handle.is_null() {
-                        finish(handle);
+                    if let Ok(handle) = init_result.as_ref() {
+                        if !handle.is_null() {
+                            let _ = guarded_finish(finish, *handle);
+                        }
                     }
                     return Err(error);
                 }
             }
+            let handle = init_result?;
             if handle.is_null() {
-                bail!("LG rejected histogram initialization (capture busy?)");
+                bail!("LG rejected histogram initialization (capture busy or denied?)");
             }
-            if preset(handle, 0) != 0 {
-                finish(handle);
-                bail!("LG histogram preset 0 failed");
+            match guarded_preset(preset, handle, 0) {
+                Ok(0) => {}
+                Ok(rc) => {
+                    let _ = guarded_finish(finish, handle);
+                    bail!("LG histogram preset 0 failed ({rc})");
+                }
+                Err(error) => {
+                    let _ = guarded_finish(finish, handle);
+                    return Err(error);
+                }
             }
             Ok(Self {
                 handle,
@@ -216,7 +351,7 @@ impl HistogramCapture {
             bail!("LG revoked histogram capture");
         }
         let mut records = [NativeHistogram::default(); 16];
-        let rc = unsafe { (self.get)(self.handle, records.as_mut_ptr()) };
+        let rc = unsafe { guarded_get(self.get, self.handle, records.as_mut_ptr()) }?;
         if rc != 0 {
             bail!("LG histogram read failed ({rc})");
         }
@@ -243,8 +378,8 @@ impl HistogramCapture {
 impl Drop for HistogramCapture {
     fn drop(&mut self) {
         if !self.handle.is_null() {
-            unsafe {
-                (self.finish)(self.handle);
+            if let Err(error) = unsafe { guarded_finish(self.finish, self.handle) } {
+                tracing::warn!("LG native histogram cleanup failed: {error:#}");
             }
             self.handle = std::ptr::null_mut();
         }
