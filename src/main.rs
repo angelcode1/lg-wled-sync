@@ -75,6 +75,18 @@ enum Commands {
         #[arg(long)]
         raw_nv12_stats: bool,
     },
+    /// Explicit, bounded native LG histogram probe; no config or light output
+    TestHistogram {
+        /// Confirm that this test temporarily initializes the LG VT histogram device
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+        /// Number of samples (2–20)
+        #[arg(long, default_value_t = 8)]
+        samples: u8,
+        /// Delay between samples in milliseconds (100–2000)
+        #[arg(long, default_value_t = 600)]
+        interval_ms: u64,
+    },
     /// Discover and pair with a Philips Hue Bridge via pushlink button
     Pair {
         #[arg(short, long)]
@@ -115,6 +127,11 @@ async fn main() -> Result<()> {
             config,
             raw_nv12_stats,
         } => run_test_capture(config, raw_nv12_stats).await,
+        Commands::TestHistogram {
+            acknowledge_native_capture,
+            samples,
+            interval_ms,
+        } => run_test_histogram(acknowledge_native_capture, samples, interval_ms).await,
         Commands::Pair { bridge, output } => run_pair(bridge, output).await,
         Commands::SyncHue { config, area } => run_sync_hue(config, area).await,
         Commands::PairNanoleaf { ip, config } => run_pair_nanoleaf(ip, config).await,
@@ -1900,6 +1917,95 @@ async fn run_test_nanoleaf(config_path: PathBuf) -> Result<()> {
     }
 
     info!("[+] Nanoleaf 4D test pattern completed successfully!");
+    Ok(())
+}
+
+/// Probe only aggregate RGB histogram counts. This is an opt-in hardware
+/// operation: initialization may create a temporary LG developer marker and
+/// acquire exclusive VT capture ownership. No LEDs, frames or pixels sent.
+async fn run_test_histogram(
+    acknowledge_native_capture: bool,
+    samples: u8,
+    interval_ms: u64,
+) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "native capture probe requires --acknowledge-native-capture;              stop other VT owners and review docs/LG_C5_HISTOGRAM_PROBE.md"
+        ));
+    }
+    if !(2..=20).contains(&samples) {
+        return Err(anyhow!("samples must be between 2 and 20"));
+    }
+    if !(100..=2000).contains(&interval_ms) {
+        return Err(anyhow!("interval-ms must be between 100 and 2000"));
+    }
+    info!(
+        "Initializing LG native histogram for {} samples, {}ms interval; no light output",
+        samples, interval_ms
+    );
+    let mut capture = HistogramCapture::try_new().context(
+        "LG histogram init failed; do not start competing capture or change system flags",
+    )?;
+    let mut previous: Option<[RgbColor; 16]> = None;
+    let mut valid_samples = 0usize;
+    let mut failed_samples = 0usize;
+    let mut changed_transitions = 0usize;
+    for sample_id in 1..=samples {
+        match capture.sample() {
+            Ok(regions) => {
+                valid_samples += 1;
+                let changed_regions = previous
+                    .as_ref()
+                    .map(|last| {
+                        last.iter()
+                            .zip(regions.iter())
+                            .filter(|(a, b)| {
+                                a.r.abs_diff(b.r) >= 4
+                                    || a.g.abs_diff(b.g) >= 4
+                                    || a.b.abs_diff(b.b) >= 4
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+                if previous.is_some() && changed_regions != 0 {
+                    changed_transitions += 1;
+                }
+                let region_summary = regions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, rgb)| {
+                        format!("{index:02}={:03},{:03},{:03}", rgb.r, rgb.g, rgb.b)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                info!(
+                    "HISTOGRAM_SAMPLE {}/{} changed_regions={} {}",
+                    sample_id, samples, changed_regions, region_summary
+                );
+                previous = Some(regions);
+            }
+            Err(error) => {
+                failed_samples += 1;
+                warn!("HISTOGRAM_SAMPLE {}/{} unavailable: {error:#}", sample_id, samples);
+            }
+        }
+        if sample_id != samples {
+            tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+        }
+    }
+    drop(capture); // finalize LG VT ownership before reporting outcome.
+    info!(
+        "HISTOGRAM_RESULT valid={} failed={} changed_transitions={}",
+        valid_samples, failed_samples, changed_transitions
+    );
+    if valid_samples < 2 {
+        return Err(anyhow!(
+            "histogram did not yield two valid samples; check the native error lines"
+        ));
+    }
+    if changed_transitions == 0 {
+        warn!("No measurable regional change; scene may be static or histogram input unavailable");
+    }
     Ok(())
 }
 
