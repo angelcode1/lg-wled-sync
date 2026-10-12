@@ -12,6 +12,13 @@ use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+// Exporting this C symbol is necessary for LG's native diagnostic calls.
+// See native/lg_printlog.c. The ABI is verified at link time on Linux.
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn lg_printlog_anchor() -> libc::c_int;
+}
+
 const DEVICE: &str = "/usr/lib/libvtcapture.so.1";
 const MARKER: &str = "/var/luna/preferences/vt_devmode";
 static REVOKED: AtomicBool = AtomicBool::new(false);
@@ -163,6 +170,10 @@ impl Drop for MarkerGuard {
 
 impl HistogramCapture {
     pub fn try_new() -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        if unsafe { lg_printlog_anchor() } != 1 {
+            bail!("LG native diagnostic ABI shim was not linked");
+        }
         if std::mem::size_of::<NativeHistogram>() != 0x604 {
             bail!("LG histogram ABI record size mismatch");
         }
