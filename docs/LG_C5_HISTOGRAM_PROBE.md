@@ -23,6 +23,62 @@ kernel and all four `vtCapture_*Histogram` symbols.
 This is a diagnostic of LG-provided **aggregate** capture measurements,
 not a means of accessing DRM-decrypted frames.
 
+## Observed C5 failure: no histogram samples yet
+
+On 2026-10-12, the first live test on OLED42C5PSA.AAUQLJD
+reported `LSRegisterPubPriv FAILED` as a C++ `std::runtime_error`
+during native initialization. The CLI process terminated before the
+first region was sampled. The capture library's exported histogram
+symbols are real, but their runtime availability is still unproven.
+
+A related historical case is
+[hyperion-webos issue #89](https://github.com/webosbrew/hyperion-webos/issues/89),
+where a native capture probe also reported `LSRegisterPubPriv FAILED`.
+Its thread includes a separate application permission issue, but
+**we have not confirmed the same cause on this C5**.
+
+The revised backend adds a C++ wrapper for synchronous exceptions in
+native initialization, preset, sampling and finalization; it should
+return a Rust error for this specific exception instead of killing the
+CLI. It does not resolve the Luna registration requirements or protect
+against unrelated driver crashes.
+
+**Do not rerun the original crashing binary.** In particular,
+`scripts/provision_luna.sh` is a legacy script for a different
+installed executable and uses broad Luna privileges. Do not run it as
+a speculative workaround. The current standalone test path is
+`/var/home/root/c5-histogram-probe`, which differs from the legacy
+role's `exeName`.
+
+Read-only TV checks:
+
+```bash
+ssh root@192.168.8.184 'sh -s' <<'TV'
+echo '===== marker after crash ====='
+ls -l /var/luna/preferences/vt_devmode 2>&1 || true
+echo '===== test binary ====='
+id
+ls -l /var/home/root/c5-histogram-probe
+readlink -f /var/home/root/c5-histogram-probe
+echo '===== competing capture processes ====='
+ps | grep -Ei 'piccap|hyperdrm|histogram|lg-hue-sync' | grep -v grep || true
+echo '===== Luna registration-related file names ====='
+for dir in /var/luna-service2 /var/luna-service2-dev; do
+  for sub in manifests.d roles.d client-permissions.d; do
+    if [ -d "$dir/$sub" ]; then
+      ls "$dir/$sub" | grep -iE 'capture|histogram|hyperion|hue.sync|wled' || true
+    fi
+  done
+done
+echo '===== library dependencies ====='
+ls -l /usr/lib/libresource_mgr_client.so* 2>&1 || true
+TV
+```
+
+No system service restart, role change or HDCP modification is
+needed for these checks. Inspect any security-relevant file contents
+locally before sharing them.
+
 ## Build and download
 
 GitHub Actions on the `feature/vendor-neutral-wled-drm-first` branch runs
