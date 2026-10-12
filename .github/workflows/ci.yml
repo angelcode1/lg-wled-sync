@@ -30,7 +30,7 @@ jobs:
           persist-credentials: false
       - name: Verify preinstalled Ubuntu host prerequisites
         run: |
-          for tool in cc make perl cmake pkg-config python3 node git; do
+          for tool in cc c++ make perl cmake pkg-config python3 node git; do
             command -v "$tool"
           done
       - name: Install stable Rust with formatter and linter
@@ -57,6 +57,12 @@ jobs:
         run: bash -n scripts/c5_profile.sh
       - name: Test C5 profile importer (offline)
         run: python3 -m unittest discover -s scripts -p test_c5_profile_import.py -v
+      - name: Test LG native C++ exception boundary
+        run: |
+          c++ -std=c++11 -Wall -Wextra -Werror -O2 \
+            native/lg_histogram_guard.cpp native/test_histogram_guard.cpp \
+            -o "$RUNNER_TEMP/test_histogram_guard"
+          "$RUNNER_TEMP/test_histogram_guard"
       - name: Enforce rustfmt
         run: cargo fmt --all -- --check
       - name: Run locked Rust test suite
