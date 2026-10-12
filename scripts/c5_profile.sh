@@ -16,6 +16,11 @@ SSH=(ssh -o ConnectTimeout=10 -p "$SSH_PORT" "$TV_USER@$TV_HOST")
 case "$MODE" in
 preflight)
   "${SSH[@]}" 'sh -s' > "$OUT/preflight.txt" <<'REMOTE'
+# The C5's -n 1 Luna client silently returns empty stdout.
+# Interactive -i needs its stdin held open while receiving replies.
+luna_query() {
+  sleep 5 | luna-send -i -f "$1" "$2" 2>&1
+}
 printf '\n=== kernel versus userspace (distinct architectures) ===\n'
 id; uname -a
 printf 'kernel machine: '; uname -m
@@ -32,11 +37,11 @@ fi
 printf '\n=== Luna availability ===\n'
 command -v luna-send || echo 'luna-send not found in SSH PATH'
 printf '\n=== model ===\n'
-luna-send -n 1 -f -w 2000 luna://com.webos.service.tv.systemproperty/getSystemInfo '{"keys":["modelName"]}' 2>&1
+luna_query luna://com.webos.service.tv.systemproperty/getSystemInfo '{"keys":["modelName"]}'
 printf 'model Luna exit code: %s\n' "$?"
 echo 'NOTE: exit 0 with no JSON is still an unanswered Luna request'
 printf '\n=== media pipelines ===\n'
-luna-send -n 1 -f -w 2000 luna://com.webos.media/getActivePipelines '{}' 2>&1
+luna_query luna://com.webos.media/getActivePipelines '{}'
 printf 'pipeline Luna exit code: %s\n' "$?"
 echo 'NOTE: empty reply is Unknown playback classification'
 printf '\n=== LG capture symbols (absence is NOT proven if readelf missing) ===\n'
@@ -57,7 +62,7 @@ for dir in /media/developer/apps/usr/palm/applications /media/developer/apps/usr
   fi
 done
 printf '\n=== HyperDRM status ===\n'
-luna-send -n 1 -f -w 2000 luna://org.webosbrew.histogramhyperion.service/status '{}' 2>&1
+luna_query luna://org.webosbrew.histogramhyperion.service/status '{}'
 printf 'HyperDRM status Luna exit code: %s\n' "$?"
 printf '\n=== saved profile path ===\n'
 ls -l /media/developer/apps/usr/palm/services/org.webosbrew.histogramhyperion.service/calibration.json 2>&1 || true
@@ -97,12 +102,13 @@ record)
   fi
   "${SSH[@]}" 'sh -s' > "$OUT/region-observations.log" <<'REMOTE'
 i=0
-while [ "$i" -lt 360 ]; do
+while [ "$i" -lt 40 ]; do
   printf 'SAMPLE %s\n' "$(date +%s 2>/dev/null || echo 0)"
-  luna-send -n 1 -f -w 2000 luna://org.webosbrew.histogramhyperion.service/status '{}' 2>&1
+  # Supplementary coarse status samples, not a replacement for the
+  # HyperDRM 32-patch wizard's internal fresh region measurements.
+  sleep 3 | luna-send -i -f luna://org.webosbrew.histogramhyperion.service/status '{}' 2>&1
   printf '\nEND_SAMPLE\n'
   i=$((i+1))
-  sleep 0.25
 done
 REMOTE
   echo "Saved $OUT/region-observations.log"
@@ -112,7 +118,7 @@ launch)
     echo 'HyperDRM app is not installed: cannot launch its calibration wizard.' >&2
     exit 3
   fi
-  "${SSH[@]}" "luna-send -n 1 -f -w 2000 luna://com.webos.applicationManager/launch '{\"id\":\"org.webosbrew.histogramhyperion\",\"params\":{\"action\":\"calibrate\"}}'" | tee "$OUT/launch.txt"
+  "${SSH[@]}" "sleep 5 | luna-send -i -f luna://com.webos.applicationManager/launch '{\"id\":\"org.webosbrew.histogramhyperion\",\"params\":{\"action\":\"calibrate\"}}'" | tee "$OUT/launch.txt"
   echo 'Use TV remote to choose Calibration > Start Auto Calibration if needed.'
   ;;
 fetch)
@@ -121,7 +127,7 @@ fetch)
     exit 3
   fi
   "${SSH[@]}" 'cat /media/developer/apps/usr/palm/services/org.webosbrew.histogramhyperion.service/calibration.json' > "$OUT/saved-calibration.json"
-  "${SSH[@]}" "luna-send -n 1 -f -w 2000 luna://org.webosbrew.histogramhyperion.service/status '{}'" > "$OUT/service-status.txt" || true
+  "${SSH[@]}" "sleep 5 | luna-send -i -f luna://org.webosbrew.histogramhyperion.service/status '{}'" > "$OUT/service-status.txt" || true
   echo "Saved $OUT/saved-calibration.json and $OUT/service-status.txt"
   ;;
 *) echo "Unknown mode: $MODE" >&2; exit 2 ;;
