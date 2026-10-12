@@ -284,7 +284,7 @@ impl OutputFanout<'_> {
                         }
                         Err(error) => {
                             self.shared.hue_connected.store(false, Ordering::Relaxed);
-                            warn!("Hue output error: {error}");
+                            warn!("{} output error: {error}", adapter.kind());
                             if self.hue_retry.ready() {
                                 match reconnect_hue(self.config) {
                                     Ok(new_dtls) => {
@@ -326,7 +326,7 @@ impl OutputFanout<'_> {
                             }
                             Err(error) => {
                                 self.shared.nanoleaf_connected.store(false, Ordering::Relaxed);
-                                warn!("Nanoleaf output error: {error}");
+                                warn!("{} output error: {error}", transport.kind());
                                 if self.nanoleaf_retry.ready() {
                                     if let Some(ncfg) = self.config.nanoleaf.as_ref() {
                                         match nanoleaf::enable_external_control(
@@ -370,7 +370,7 @@ impl OutputFanout<'_> {
                     }
                     Err(error) => {
                         all_wled_ok = false;
-                        warn!("WLED output {index} failed: {error}");
+                        warn!("{} output {index} failed: {error}", transport.kind());
                     }
                 }
             }

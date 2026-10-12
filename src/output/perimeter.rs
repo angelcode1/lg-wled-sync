@@ -68,6 +68,7 @@ impl PerimeterSampler {
         }
     }
     pub fn screen_positions(&self) -> &[Point] { &self.points }
+    #[allow(dead_code)] // legacy sampler: replaced by the shared ColorPipeline
     pub fn sample_frame(&mut self, data: &[u8], width: u32, height: u32, bgra: bool,
         letterbox: bool) -> Option<Vec<RgbColor>> {
         let w=usize::try_from(width).ok()?;
