@@ -331,6 +331,68 @@ of protected streams. No further histogram init is justified until
 we can identify the failed registration or other native initialization
 preconditions.
 
+## 2026-10-13: capture-security policy files positively identified
+
+The C5 role-file inventory resolved the misleading earlier empty-content
+search. Counts of regular files/symlinks at these locations:
+
+- `/usr/share/ls2/roles/prv`: 118
+- `/usr/share/ls2/roles/pub`: 109
+- `/var/palm/ls2/roles/prv`: 1
+- `/var/palm/ls2/roles/pub`: 1
+- `/usr/share/luna-service2/roles.d`: 311
+- `/var/luna-service2/roles.d`: 6
+- `/var/luna-service2-dev/roles.d`: 16
+
+The **exact filesystem paths confirmed present** by `find` are:
+
+- `/usr/share/luna-service2/roles.d/com.webos.service.capture.role.json`
+- `/usr/share/luna-service2/client-permissions.d/com.webos.service.capture.perm.json`
+- `/usr/share/luna-service2/api-permissions.d/com.webos.service.capture.api.json`
+- `/usr/share/luna-service2/groups.d/com.webos.service.capture.groups.json`
+- `/usr/share/luna-service2/manifests.d/screen-capture-webos.manifest.json`
+- `/usr/share/luna-service2/services.d/com.webos.service.capture.service`
+- `/usr/share/luna-service2/roles.d/com.webos.service.capture.testsuite.role.json`
+- `/usr/share/luna-service2/manifests.d/avcaptureinf.manifest.json`
+- `/usr/share/ls2/roles/prv/avcaptureinf-test.json`
+- `/usr/share/ls2/roles/pub/avcaptureinf-test.json`
+
+**Only existence is verified.** We have not inspected their JSON values,
+whether the manifest actually names each file, whether their client role
+permits the standalone Rust executable path, or the precise identity
+which fails `LSRegisterPubPriv`.
+
+Read-only follow-up (do not invoke vendor capture or modify permissions):
+
+```sh
+ssh root@192.168.8.184 'sh -s' <<'TV'
+for F in \
+  /usr/share/luna-service2/manifests.d/screen-capture-webos.manifest.json \
+  /usr/share/luna-service2/roles.d/com.webos.service.capture.role.json \
+  /usr/share/luna-service2/client-permissions.d/com.webos.service.capture.perm.json \
+  /usr/share/luna-service2/api-permissions.d/com.webos.service.capture.api.json \
+  /usr/share/luna-service2/groups.d/com.webos.service.capture.groups.json \
+  /usr/share/luna-service2/services.d/com.webos.service.capture.service \
+  /usr/share/luna-service2/roles.d/com.webos.service.capture.testsuite.role.json; do
+  echo
+  echo "===== $F ====="
+  if [ -f "$F" ]; then
+    ls -l "$F"
+    sed -n '1,180p' "$F"
+  else
+    echo NOT_FOUND
+  fi
+done
+TV
+```
+
+These files may describe other services or policies: do not grant
+`all` access or use system service registration names as the new
+application identity without validating the actual LS2 contract.
+The C5's system capture service has separately registered successfully,
+but that does **not** prove it permits a new native capture client.
+Preserve capture-denial and secure-video refusal behaviour.
+
 ## Build and download
 
 GitHub Actions on the `feature/vendor-neutral-wled-drm-first` branch runs
