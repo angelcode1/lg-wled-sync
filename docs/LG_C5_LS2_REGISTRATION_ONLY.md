@@ -225,6 +225,68 @@ name family and `LSRegister`, plus an optional, separately reviewed
 stage-2 regular role with only that additional registration name.
 Do not broaden outbound permissions or invoke `test-histogram`.
 
+## Stage 2: capture-client registration-only diagnostic (code staged, NOT run)
+
+After the successful Resource Manager registration A/B test, the
+`lg-hue-sync` CLI gained:
+
+```sh
+/var/home/root/c5-histogram-probe test-ls2-registration \
+  --acknowledge-luna-registration --capture-client
+```
+
+Unlike the default Resource Manager mode (which uses
+`LSRegisterPubPriv` with the private-bus argument), this flag
+constructs `com.webos.service.capture.client<decimal>` and calls
+`LSRegister`, matching the independent registration family
+and function found in the C5 native `libvtcapture` ELF.
+It immediately unregisters upon success. It does **not**
+call `vtCapture_initHistogram`, access HDMI or touch the
+`vt_devmode` developer marker.
+
+The native suffix is generated from `/dev/urandom` modulo 10,000;
+the diagnostic uses `PID % 10000` as a repeatable numeric test name.
+A name collision is unlikely but possible; registration outcomes
+must still be interpreted using the returned `LSError`.
+
+**First, test with the currently installed stage-1 Resource Manager
+role still active.** Use a fresh, fully passed ARMv7 CI build
+containing the new `--capture-client` flag, deploy it to
+`/var/home/root/c5-histogram-probe` with a backup, then verify
+the previously working Resource Manager test still succeeds and
+the capture-client mode's result. The baseline may be
+`LS2_PROBE_REJECTED code=-1027`, since the current role does
+not allow this second name. Do not guess the outcome.
+
+A potential replacement for the **existing application-specific
+role**, but **not installed**, is staged at:
+
+`security/c5-registration-only/stage2-role.json`
+
+It retains the Resource Manager name and
+`outbound: ["com.webos.media"]`, adds only
+`com.webos.service.capture.client*` to `allowedNames`,
+and gives that new registration identity `outbound: []`:
+no extra service calling rights or API permission groups.
+This is a diagnostic-only **candidate**; whether this OEM hub
+accepts an empty outbound list must be empirically established.
+
+Do not create a second role with a duplicate `exeName`.
+If a stage-2 policy change is warranted based on the new baseline,
+safely back up the existing diagnostic role and **replace only
+that exact owned development-policy file**, retain the original
+manifest path, invoke `ls-control scan-services`, and repeat
+both registration-only subcommands. Confirm that the role
+being replaced exactly matches the stage-1 fixture;
+otherwise abort. Do not modify LG's `/usr/share` roles
+or copy the vendor test suite's `outbound: ["*"]`.
+
+**Important:** even two successful registration tests do not
+verify the capture permission whitelist, policy callbacks,
+16-region histogram ABI, edge calibration or HDMI secure-video
+availability. The histogram probe remains blocked pending
+separate engineering review.
+
 ## Read-only C5 preflight (no registration)
 
 ```bash
