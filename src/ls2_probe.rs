@@ -20,12 +20,8 @@ struct LunaError {
 
 type ErrorInit = unsafe extern "C" fn(*mut LunaError) -> bool;
 type ErrorFree = unsafe extern "C" fn(*mut LunaError);
-type RegisterPubPriv = unsafe extern "C" fn(
-    *const libc::c_char,
-    *mut *mut libc::c_void,
-    bool,
-    *mut LunaError,
-) -> bool;
+type RegisterPubPriv =
+    unsafe extern "C" fn(*const libc::c_char, *mut *mut libc::c_void, bool, *mut LunaError) -> bool;
 type Unregister = unsafe extern "C" fn(*mut libc::c_void, *mut LunaError) -> bool;
 
 const RM_NAME_PREFIX: &str = "com.webos.rm.client._lghuesyncprobe";
@@ -54,9 +50,7 @@ fn error_details(error: &LunaError) -> String {
 /// VT native client construction. The caller must explicitly acknowledge.
 pub fn run(acknowledge: bool) -> Result<()> {
     if !acknowledge {
-        bail!(
-            "LS2 registration is an active bus operation; pass --acknowledge-luna-registration"
-        );
+        bail!("LS2 registration is an active bus operation; pass --acknowledge-luna-registration");
     }
 
     let name = registration_name(std::process::id());
@@ -106,7 +100,9 @@ pub fn run(acknowledge: bool) -> Result<()> {
         if !unregistered {
             let detail = error_details(&cleanup_error);
             free(&mut cleanup_error);
-            return Err(anyhow!("LS2_PROBE_UNREGISTER_FAILED name={name_text} {detail}"));
+            return Err(anyhow!(
+                "LS2_PROBE_UNREGISTER_FAILED name={name_text} {detail}"
+            ));
         }
         free(&mut cleanup_error);
         println!("LS2_PROBE_OK name={name_text} registered=true unregistered=true capture=false");
