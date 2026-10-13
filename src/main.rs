@@ -106,6 +106,12 @@ enum Commands {
         #[arg(long)]
         acknowledge_native_capture: bool,
     },
+    /// One native buffer descriptor request, without dereferencing pixels
+    TestFrameDescriptor {
+        /// Acknowledge one short-lived native buffer-descriptor lookup
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+    },
     /// Register/unregister a temporary private LS2 name without loading the VT capture driver
     TestLs2Registration {
         /// Explicitly acknowledge an active Luna bus registration attempt
@@ -169,6 +175,9 @@ async fn main() -> Result<()> {
         Commands::TestFrameProcess {
             acknowledge_native_capture,
         } => run_test_frame_process(acknowledge_native_capture).await,
+        Commands::TestFrameDescriptor {
+            acknowledge_native_capture,
+        } => run_test_frame_descriptor(acknowledge_native_capture).await,
         Commands::TestLs2Registration {
             acknowledge_luna_registration,
             capture_client,
@@ -2258,6 +2267,58 @@ mod c5_frame_process_cli_tests {
         assert!(matches!(
             parsed.command,
             Commands::TestFrameProcess {
+                acknowledge_native_capture: true
+            }
+        ));
+    }
+}
+
+/// One native descriptor request on a known-clear display-output path.
+/// The Rust implementation does not dereference or expose returned addresses.
+async fn run_test_frame_descriptor(acknowledge_native_capture: bool) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "test-frame-descriptor requires --acknowledge-native-capture; this can activate LG VT hardware"
+        ));
+    }
+    for sample in 1..=3 {
+        let class = capture::media::query().await;
+        if class != PlaybackClass::Clear {
+            return Err(anyhow!(
+                "FRAME_DESCRIPTOR_REFUSED: media sample {sample}/3 is {class:?}; only independently known clear content"
+            ));
+        }
+        if sample < 3 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    info!("FRAME_DESCRIPTOR_CLEAR_GATE_PASS: 3/3 spaced Clear classifications");
+    VtCapture::probe_buffer_descriptor_once()
+}
+
+#[cfg(test)]
+mod c5_frame_descriptor_cli_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn descriptor_probe_requires_acknowledgement() {
+        let error = run_test_frame_descriptor(false)
+            .await
+            .expect_err("reject unacknowledged descriptor call");
+        assert!(error.to_string().contains("--acknowledge-native-capture"));
+    }
+
+    #[test]
+    fn descriptor_subcommand_is_distinct_from_capture() {
+        let parsed = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-frame-descriptor",
+            "--acknowledge-native-capture",
+        ])
+        .expect("descriptor CLI parses");
+        assert!(matches!(
+            parsed.command,
+            Commands::TestFrameDescriptor {
                 acknowledge_native_capture: true
             }
         ));

@@ -322,6 +322,51 @@ fn central_nv12_stats(
     })
 }
 
+// A descriptor is metadata only. Presence/length checks cannot establish
+// whether raw native pointers refer to mapped or accessible memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DescriptorSummary {
+    y_present: bool,
+    uv_present: bool,
+    y_size: usize,
+    uv_size: usize,
+}
+
+fn validate_buffer_descriptor(
+    descriptor: &LibVtCaptureBufferInfo,
+    layout: (u32, u32, u32),
+) -> Result<DescriptorSummary> {
+    let (width, height, stride) = layout;
+    let (minimum_y, minimum_uv, _) = nv12_lengths(width, height, stride)?;
+    let y_present = !descriptor.start_addr0.is_null();
+    let uv_present = !descriptor.start_addr1.is_null();
+    if !y_present || !uv_present {
+        return Err(anyhow!(
+            "native descriptor missing Y or UV pointer (y_present={y_present} uv_present={uv_present}); no pointer dereferenced"
+        ));
+    }
+    if descriptor.size0 < 0 || descriptor.size1 < 0 {
+        return Err(anyhow!("native buffer descriptor has negative plane size"));
+    }
+    let y_size = descriptor.size0 as usize;
+    let uv_size = descriptor.size1 as usize;
+    // Bound corrupted metadata; these values are NOT trusted allocation sizes.
+    if y_size < minimum_y || uv_size < minimum_uv {
+        return Err(anyhow!(
+            "native buffer descriptor plane sizes smaller than required 320x180 layout"
+        ));
+    }
+    if y_size > 16 * 1024 * 1024 || uv_size > 16 * 1024 * 1024 {
+        return Err(anyhow!("native buffer descriptor sizes exceed sanity limits"));
+    }
+    Ok(DescriptorSummary {
+        y_present,
+        uv_present,
+        y_size,
+        uv_size,
+    })
+}
+
 /**
  * One-shot native probe owner. Once preprocess has been attempted, even a
  * native error may have partially armed the scaler: attempt postprocess before
@@ -498,16 +543,23 @@ impl VtCapture {
     /// requests, pixel reads, output devices, or mode fallbacks are permitted.
     /// Call only after three fresh, positively Clear media classifications.
     pub fn probe_preprocess_metadata() -> Result<()> {
-        Self::probe_preprocess_once(false)
+        Self::probe_preprocess_once(false, false)
     }
 
     /// One native process invocation on a known-clear display-output source.
     /// No buffer metadata requests or pixel reads. Process MAY enable a stream.
     pub fn probe_process_no_buffers() -> Result<()> {
-        Self::probe_preprocess_once(true)
+        Self::probe_preprocess_once(true, false)
     }
 
-    fn probe_preprocess_once(process_once: bool) -> Result<()> {
+    /// Exactly one request for the native buffer *descriptor*, not its bytes.
+    /// The returned pointers are treated as opaque: never logged, copied or
+    /// dereferenced. The source must have been independently verified Clear.
+    pub fn probe_buffer_descriptor_once() -> Result<()> {
+        Self::probe_preprocess_once(true, true)
+    }
+
+    fn probe_preprocess_once(process_once: bool, descriptor_once: bool) -> Result<()> {
         let lib = unsafe { Library::new(LIBVTCAPTURE_PATH) }
             .context("unable to load LG VT library for metadata-only probe")?;
         let caller = CString::new("org.webosbrew.lg-hue-sync")?;
@@ -519,6 +571,8 @@ impl VtCapture {
             let preprocess: Symbol<FnVtCapturePreprocess> = lib.get(b"vtCapture_preprocess\0")?;
             let plane_info: Symbol<FnVtCapturePlaneInfo> = lib.get(b"vtCapture_planeInfo\0")?;
             let process: Symbol<FnVtCaptureProcess> = lib.get(b"vtCapture_process\0")?;
+            let current_buffer: Symbol<FnVtCaptureCurrentCaptureBuffInfo> =
+                lib.get(b"vtCapture_currentCaptureBuffInfo\0")?;
             let stop: Symbol<FnVtCaptureStop> = lib.get(b"vtCapture_stop\0")?;
             let postprocess: Symbol<FnVtCapturePostprocess> =
                 lib.get(b"vtCapture_postprocess\0")?;
@@ -546,7 +600,7 @@ impl VtCapture {
 
             // The closure must not return directly from the outer scope:
             // explicit cleanup has to run for both success and native refusal.
-            let operation = (|| -> Result<(u32, u32, u32)> {
+            let operation = (|| -> Result<((u32, u32, u32), Option<DescriptorSummary>)> {
                 let init_code = frame_native!(
                     lg_frame_guard_init,
                     "init",
@@ -636,13 +690,50 @@ impl VtCapture {
                         .into());
                     }
                 }
-                Ok(layout)
+
+                // One native descriptor fetch; no retry, pointer arithmetic,
+                // buffer reading, slices, hashes, or image/light output.
+                // An error code is terminal and cleanup is still performed.
+                let summary = if descriptor_once {
+                    let mut descriptor = LibVtCaptureBufferInfo {
+                        start_addr0: std::ptr::null_mut(),
+                        start_addr1: std::ptr::null_mut(),
+                        size0: 0,
+                        size1: 0,
+                    };
+                    let rc = frame_native!(
+                        lg_frame_guard_current_buffer,
+                        "current-buffer-descriptor",
+                        *current_buffer,
+                        session.driver,
+                        &mut descriptor
+                    )?;
+                    if rc != 0 {
+                        return Err(NativeCaptureError {
+                            backend: "libvtcapture",
+                            operation: "vtCapture_currentCaptureBuffInfo",
+                            code: rc,
+                        }
+                        .into());
+                    }
+                    Some(validate_buffer_descriptor(&descriptor, layout)?)
+                } else {
+                    None
+                };
+                Ok((layout, summary))
             })();
 
             let cleanup = session.cleanup();
             match (operation, cleanup) {
-                (Ok((width, height, stride)), Ok(())) => {
-                    if process_once {
+                (Ok(((width, height, stride), summary)), Ok(())) => {
+                    if let Some(summary) = summary {
+                        info!(
+                            "C5_FRAME_DESCRIPTOR_PASS: display-output plane={}x{} stride={} y_present={} uv_present={} y_size={} uv_size={} descriptor_calls=1 frame_reads=0 clean_shutdown=true",
+                            width, height, stride,
+                            summary.y_present, summary.uv_present,
+                            summary.y_size, summary.uv_size
+                        );
+                    } else if process_once {
                         info!(
                             "C5_FRAME_PROCESS_PASS: display-output plane={}x{} stride={} process_calls=1 frame_reads=0 clean_shutdown=true",
                             width, height, stride
@@ -1275,6 +1366,46 @@ impl Drop for VtCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buffer_descriptor_is_checked_as_opaque_metadata_only() {
+        // Deliberately invalid non-null pointers. The validator must not
+        // dereference, copy or create slices from either address.
+        let descriptor = LibVtCaptureBufferInfo {
+            start_addr0: std::ptr::dangling_mut::<u8>(),
+            start_addr1: std::ptr::dangling_mut::<u8>(),
+            size0: 320 * 180,
+            size1: 320 * 90,
+        };
+        let valid = validate_buffer_descriptor(&descriptor, (320, 180, 320)).unwrap();
+        assert!(valid.y_present && valid.uv_present);
+        assert_eq!(valid.y_size, 57600);
+        assert_eq!(valid.uv_size, 28800);
+
+        let missing_uv = LibVtCaptureBufferInfo {
+            start_addr1: std::ptr::null_mut(),
+            ..descriptor
+        };
+        assert!(validate_buffer_descriptor(&missing_uv, (320, 180, 320)).is_err());
+
+        let undersized = LibVtCaptureBufferInfo {
+            size0: 57599,
+            ..descriptor
+        };
+        assert!(validate_buffer_descriptor(&undersized, (320, 180, 320)).is_err());
+
+        let negative = LibVtCaptureBufferInfo {
+            size1: -1,
+            ..descriptor
+        };
+        assert!(validate_buffer_descriptor(&negative, (320, 180, 320)).is_err());
+
+        let huge = LibVtCaptureBufferInfo {
+            size0: 17 * 1024 * 1024,
+            ..descriptor
+        };
+        assert!(validate_buffer_descriptor(&huge, (320, 180, 320)).is_err());
+    }
 
     #[test]
     fn process_probe_cleanup_stops_before_postprocess_finalize_release() {
