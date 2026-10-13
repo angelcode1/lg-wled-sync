@@ -104,8 +104,8 @@ pub fn query_c5_video60_capabilities() -> Result<V4l2QuerycapReport> {
     if std::mem::size_of::<V4l2Capability>() != 104 {
         bail!("V4L2 querycap structure does not match expected 104-byte ABI");
     }
-    let metadata = std::fs::symlink_metadata(VIDEO60)
-        .context("cannot inspect capture device before query")?;
+    let metadata =
+        std::fs::symlink_metadata(VIDEO60).context("cannot inspect capture device before query")?;
     if !metadata.file_type().is_char_device() {
         bail!("C5 querycap refused: /dev/video60 is not a character device");
     }
@@ -122,7 +122,9 @@ pub fn query_c5_video60_capabilities() -> Result<V4l2QuerycapReport> {
         .open(VIDEO60)
         .context("open O_RDONLY video60 refused; no retry with alternate permissions")?;
 
-    let opened = file.metadata().context("cannot fstat opened video60 node")?;
+    let opened = file
+        .metadata()
+        .context("cannot fstat opened video60 node")?;
     if !opened.file_type().is_char_device() || opened.rdev() != expected {
         bail!("opened V4L2 node identity changed; refusing query");
     }

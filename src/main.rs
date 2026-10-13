@@ -2548,7 +2548,8 @@ mod c5_v4l2_querycap_cli_tests {
 
     #[test]
     fn querycap_requires_explicit_device_open_consent() {
-        let error = run_test_v4l2_querycap(false).expect_err("must not open without acknowledgement");
+        let error =
+            run_test_v4l2_querycap(false).expect_err("must not open without acknowledgement");
         assert!(error.to_string().contains("--acknowledge-device-open"));
     }
 

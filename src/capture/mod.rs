@@ -3,8 +3,8 @@ pub mod drm_routing;
 pub mod histogram;
 pub mod luna_client;
 pub mod media;
-pub mod vtcapture;
 pub mod v4l2_metadata;
+pub mod vtcapture;
 
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
