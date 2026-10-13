@@ -373,3 +373,113 @@ source implementation has been reviewed. Do not test a new
 V4L2 queue owner, DMABUF export, DMA mapping, or direct pixel
 read based solely on the presence of exported symbol names.
 Continue retaining the exact-C5 fail-closed raw-pixel guard.
+
+
+## Public-source-route review (2026-10-13)
+
+The user supplied an alternative source-acquisition assessment.
+Its useful search targets were cross-checked with current public
+repositories and the primary projects' own pages. **No new driver
+source was downloaded or inspected in this review.**
+
+### Chronomaly firmware/kernel evidence: related, not matching
+
+The independent
+[AnalyticETH/chronomaly-webos project](https://github.com/AnalyticETH/chronomaly-webos)
+lists `OLED77C5PUA` among later tested firmware targets,
+`33.22.65–33.30.97`, with kernel revisions
+`5.4.268-320` and `-329`. Its documentation is evidence
+that later C5 models share the **5.4.268 kernel base**,
+but not that this television's `33.00.71` firmware or
+`5.4.268-324` V4L2 driver has identical code.
+The exact installed kernel revision is independently verified
+on the owner's C5; the Chronomaly exploit is **not needed**
+for acquisition or verification, and must not be run on the TV.
+
+### LG official source catalog: first choice
+
+[LG Open Source product catalog](https://opensource.lge.com/product)
+is the source of record for corresponding source offers.
+Search using `OLED42C5PSA`, `OLED*C5P*`, `O22N3`,
+and related 2025 webOS product family names, but **avoid**
+concluding that C2/C3/C4 files apply to this C5.
+
+There is **no verified rule** that LG publishes exactly one
+kernel tarball per generation, or that every firmware sub-build
+gets a separate downloadable tar. Treat both patterns as
+unconfirmed until the catalog's actual file/version manifests
+can be examined. A candidate matching O22N3 but not
+`33.00.71 / 5.4.268-324` is useful for comparison,
+**not proof of binary-identical driver behavior**.
+
+### Software Freedom Conservancy: useful, not a current C5 mirror
+
+[Use The Source candidate list](https://sfconservancy.org/usethesource/)
+currently has an LG
+[55UR73006LA / webOS 22 source candidate](https://sfconservancy.org/usethesource/candidate/lg-55ur73006la-webos-22-klp-20/),
+published **2025-04-25**; no listed C5/webOS 25 candidate
+was found in the displayed catalog. In that LG candidate's
+public [review thread](https://lists.sfconservancy.org/pipermail/ccs-review/2025-April/000050.html),
+the reviewer explicitly reports **missing kernel sources**
+and other build omissions. The candidate is for a
+**different TV generation**, so it should not be represented
+as the desired C5 kernel source.
+
+SFC's download interface also has a participation/use
+acknowledgment tied to FOSS compliance evaluation, so
+don't treat its download service as a general-purpose
+license-unrestricted firmware mirror. Follow the conditions
+of the specific download and the applicable FOSS licenses.
+
+SFC is a useful fallback **if a future C5 candidate is added**,
+or for formally documenting deficiencies in LG-provided
+source. The current exact C5 source remains **not located**.
+
+### A portable offline matching workflow once an LG archive is obtained
+
+Preserve the original archive unmodified and its SHA-256 hash.
+Inspect the archive listing before extraction; do not unpack
+untrusted absolute paths, `../` traversal entries or
+symlinks into a privileged destination.
+
+For a source directory already safely extracted to
+`$SRC` on the Mac:
+
+```sh
+# Search source, not binaries, for the owner's live kernel symbol names:
+grep -rnE   'v4l2_vt_vidioc_(reqbufs|dqbuf|expbuf)|vt_capture_thread|vt_capture_notification|v4l2_vt_register'   --include='*.c' --include='*.h' "$SRC"
+
+# Confirm whether a compatible platform string or kernel revision is present:
+grep -rnE 'o22n3|O22N3|lge,lg1213|v4l2_vt|5\.4\.268'   --include='*.c' --include='*.h' --include='Makefile'   --include='Kconfig' --include='*.dts' --include='*.dtsi' "$SRC"
+```
+
+Note: GNU `grep --include` syntax is available with
+Homebrew GNU grep or on Linux; macOS bundled BSD grep
+may require equivalent `find -type f ... -exec grep`
+filters. No TV operations are involved.
+
+A **positive symbol match** only establishes source *similarity*.
+Before applying any conclusions to this exact TV:
+
+1. Confirm platform `O22N3` / exact SoC family.
+2. Confirm kernel/vendor branch and the specific
+   `5.4.268-324` patch level or provide an explicit
+   source-to-binary comparison.
+3. Verify the file actually defines the symbols, not
+   merely mentioning them.
+4. Inspect the V4L2 `ioctl_ops` table registration and
+   buffer-management implementation. An exported
+   `expbuf` symbol alone does not establish a working
+   export path, frame ownership, coherent CPU access or
+   appropriate capture authorization.
+5. Record archive URL, published version, SHA-256,
+   file paths, relevant license headers and degree of
+   C5/firmware match in this document.
+
+**Engineering gate unchanged:** no new video queue
+ownership, direct MMAP/DMA reads or pixel capture.
+All future active capture work must remain limited to
+authorized independently classified Clear playback,
+respect DRM/HDCP and use the existing safe cleanup
+sequence. Static source examination requires no
+capture experiment.
