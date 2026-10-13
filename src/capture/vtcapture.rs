@@ -357,7 +357,9 @@ fn validate_buffer_descriptor(
         ));
     }
     if y_size > 16 * 1024 * 1024 || uv_size > 16 * 1024 * 1024 {
-        return Err(anyhow!("native buffer descriptor sizes exceed sanity limits"));
+        return Err(anyhow!(
+            "native buffer descriptor sizes exceed sanity limits"
+        ));
     }
     Ok(DescriptorSummary {
         y_present,
