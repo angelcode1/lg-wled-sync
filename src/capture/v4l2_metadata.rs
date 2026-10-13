@@ -131,9 +131,8 @@ fn parse_mplane_format(raw: &V4l2Format) -> Result<V4l2CurrentFormat> {
     if raw.kind != MPLANE_CAPTURE {
         bail!("VIDIOC_G_FMT returned an unexpected buffer type");
     }
-    let value = |pos: usize| -> u32 {
-        u32::from_ne_bytes(raw.raw_data[pos..pos + 4].try_into().unwrap())
-    };
+    let value =
+        |pos: usize| -> u32 { u32::from_ne_bytes(raw.raw_data[pos..pos + 4].try_into().unwrap()) };
     let num_planes = raw.raw_data[180];
     if num_planes > 8 {
         bail!("VIDIOC_G_FMT plane count exceeds V4L2 multi-planar maximum");
