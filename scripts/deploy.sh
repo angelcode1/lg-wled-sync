@@ -75,13 +75,13 @@ if $WITH_CONFIG; then
     ssh $SSH_OPTS root@"$TV_IP" "chmod 600 $REMOTE_DIR/config.json"
 fi
 
-# 3. Upload and execute Luna Service 2 provisioning script
-echo "[*] Uploading provision_luna.sh to TV..."
-scp $SCP_OPTS "$(dirname "$0")/provision_luna.sh" root@"$TV_IP":"$REMOTE_DIR/provision_luna.sh"
-ssh $SSH_OPTS root@"$TV_IP" "chmod +x $REMOTE_DIR/provision_luna.sh"
-
-echo "[*] Provisioning Luna permissions for org.webosbrew.lg-hue-sync on TV..."
-ssh $SSH_OPTS root@"$TV_IP" "$REMOTE_DIR/provision_luna.sh local"
+# 3. SECURITY: Do not run the original C1 role provisioner automatically.
+# It grants privileged wildcard/all permissions, which are inappropriate for
+# the C5 registration-only diagnostic. Install any audited TV-specific roles
+# separately, after reviewing their exact executable path and grants.
+echo "[!] Legacy broad Luna provisioning is disabled for automatic deploy."
+echo "[!] Review security/c5-registration-only/ and docs/LG_C5_HISTOGRAM_PROBE.md."
+echo "[!] This deploy script is NOT the C5 registration-only probe procedure."
 
 # 4. Package and deploy webOS Application to Home Dashboard ribbon
 if [ -d "webos-app" ]; then
@@ -119,9 +119,8 @@ EOF
 mkdir -p /var/lib/webosbrew/init.d
 cat << 'EOF' > /var/lib/webosbrew/init.d/50-lg-hue-sync
 #!/bin/sh
-if [ -x /var/home/root/lg-hue-sync/provision_luna.sh ]; then
-    /var/home/root/lg-hue-sync/provision_luna.sh local || true
-fi
+# Luna role installation is always a separate, audited owner action.
+# Never re-run legacy wildcard provisioning from boot hooks.
 mkdir -p /run/systemd/system
 cp -f /var/home/root/lg-hue-sync/lg-hue-sync.service /run/systemd/system/lg-hue-sync.service
 systemctl daemon-reload
