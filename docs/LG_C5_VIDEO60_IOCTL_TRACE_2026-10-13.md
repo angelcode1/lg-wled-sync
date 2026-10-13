@@ -47,7 +47,7 @@ does not show custom, nonstandard ioctl command numbers.
 | 9 | `VIDIOC_G_EXT_CTRLS` | ID `0x00982a02`, payload **28 bytes** |
 | 10–15 | `VIDIOC_QUERYBUF` and mmap | indices **0, 1, 2**; two `mmap` calls per queried index, so **6 total mappings** |
 | 16 | `VIDIOC_G_CTRL` | ID `0x00982a07` returned **60** |
-| 17 | `VIDIOC_S_CTRL` | ID `0x00982a08`, value **2** (vendor-specific meaning; **not necessarily 2 fps**) |
+| 17 | `VIDIOC_S_CTRL` | ID `0x00982a08`, value **2**, computed as **60 source fps / 30 requested capture fps**; a rate divisor, **not 2 fps** |
 | 18 | `VIDIOC_STREAMON` | `VIDEO_CAPTURE_MPLANE` |
 | 19 | `VIDIOC_STREAMOFF` | same capture type; ≈17 ms later |
 | 20 | `VIDIOC_REQBUFS` | `count=0`, `V4L2_MEMORY_MMAP`: queue teardown |
@@ -105,6 +105,22 @@ Build ID `9fb5e56d59c29ed242c0e4a66015c71601a4657e`.
 | `0x982a02` / 28 B, G_EXT | `VtDriver::getCaptureVideoWindowInfo()`; ID/size at `0x10c28–0x10c3c`, calls G_EXT at `0x10c5c–0x10c6a` |
 | `0x982a07`, G_CTRL | `VtDriver::getCaptureFrameRate()`, at `0x101aa–0x101c8` |
 | `0x982a08`, S_CTRL | `VtDriver::setCaptureFrameRate()`, at `0x100a2–0x100c0` |
+
+**Rate divisor proved by exact ELF:** the validated metadata-only
+probe sets `_LibVtCaptureProperties.frm=30`. In
+`VtDriver::preprocessVtCapture` at `0x12440–0x12446`, the
+method loads that `frm` from `[props+0x10]` into `r1`
+and the previously obtained capture rate from
+`[driver+0x340]` into `r0`, then invokes
+`__aeabi_uidiv` through ARM PLT entry `0x9a20`
+(GOT slot `0x2fd44`). The measured `G_CTRL` rate was
+60; the computed result is **2**. At
+`0x12480–0x12484` it passes the resulting `r10`
+value to `VtDriver::setCaptureFrameRate`, which uses
+`S_CTRL(0x982a08)`. Thus the value **2 is the
+60/30 frame-rate divisor**, not 2 fps. The driver's
+exact behavior for the divisor is still private;
+this analysis does not assert how frames are skipped.
 
 The names are **internal LG library method names**, not public
 driver ABI documentation. The semantics and lifetime requirements of
