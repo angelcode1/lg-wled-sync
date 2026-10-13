@@ -357,8 +357,7 @@ impl VtCapture {
             };
 
             // Attempt release even if init/finalize returned an error.
-            let release_result =
-                frame_native!(lg_frame_guard_release, "release", *release, driver);
+            let release_result = frame_native!(lg_frame_guard_release, "release", *release, driver);
 
             let init_code = init_result?;
             if init_code != 0 {
@@ -373,8 +372,7 @@ impl VtCapture {
                 .into());
             }
 
-            let final_code = finalize_result
-                .expect("finalize required after a successful init")?;
+            let final_code = finalize_result.expect("finalize required after a successful init")?;
             if final_code != 0 {
                 return Err(NativeCaptureError {
                     backend: "libvtcapture",
