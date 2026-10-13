@@ -3,6 +3,7 @@ mod color;
 mod config;
 mod hue;
 mod local_http;
+mod ls2_probe;
 mod nanoleaf;
 mod output;
 mod runtime;
@@ -87,6 +88,12 @@ enum Commands {
         #[arg(long, default_value_t = 600)]
         interval_ms: u64,
     },
+    /// Register/unregister a temporary private LS2 name without loading the VT capture driver
+    TestLs2Registration {
+        /// Explicitly acknowledge an active Luna bus registration attempt
+        #[arg(long)]
+        acknowledge_luna_registration: bool,
+    },
     /// Discover and pair with a Philips Hue Bridge via pushlink button
     Pair {
         #[arg(short, long)]
@@ -132,6 +139,9 @@ async fn main() -> Result<()> {
             samples,
             interval_ms,
         } => run_test_histogram(acknowledge_native_capture, samples, interval_ms).await,
+        Commands::TestLs2Registration {
+            acknowledge_luna_registration,
+        } => ls2_probe::run(acknowledge_luna_registration),
         Commands::Pair { bridge, output } => run_pair(bridge, output).await,
         Commands::SyncHue { config, area } => run_sync_hue(config, area).await,
         Commands::PairNanoleaf { ip, config } => run_pair_nanoleaf(ip, config).await,
