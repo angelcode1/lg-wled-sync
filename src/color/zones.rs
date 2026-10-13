@@ -266,6 +266,7 @@ impl ColorProcessor {
         1.0 + self.saturation_boost * saturation * saturation
     }
 
+    #[allow(dead_code)] // retained for legacy per-vendor sampler compatibility
     pub fn set_smoothing(&mut self, factor: f32) {
         let factor = factor.clamp(0.05, 1.0);
         self.rise = factor;
@@ -415,6 +416,7 @@ impl ZoneSampler {
     }
 
     /// Dynamically update smoothing factor based on Hue mobile app sync intensity
+    #[allow(dead_code)] // replaced in the live daemon by ColorPipeline::tune
     pub fn set_smoothing_factor(&mut self, factor: f32) {
         self.processor.set_smoothing(factor);
     }

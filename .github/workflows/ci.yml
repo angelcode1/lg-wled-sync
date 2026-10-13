@@ -2,41 +2,142 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/vendor-neutral-wled-drm-first]
     tags: ["v*"]
   pull_request:
-    branches: [main]
+    branches: [main, feature/vendor-neutral-wled-drm-first]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: Rust fmt / tests / Clippy / dashboard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          persist-credentials: false
+      - name: Verify preinstalled Ubuntu host prerequisites
+        run: |
+          for tool in cc c++ make perl cmake pkg-config python3 node git; do
+            command -v "$tool"
+          done
+      - name: Install stable Rust with formatter and linter
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - name: Install pinned cargo-nextest
+        uses: taiki-e/install-action@v2
         with:
           tool: nextest@0.9.146
-      - run: python3 scripts/check_release.py
-      - run: cargo fmt --all -- --check
-      - run: cargo nextest run --locked
-      - run: cargo clippy --bin lg-hue-sync -- -D warnings
+          fallback: none
+      - name: Print toolchain versions
+        run: |
+          rustc --version
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+          cargo nextest --version
+          node --version
+      - name: Verify release metadata
+        run: python3 scripts/check_release.py
+      - name: Verify C5 collector shell syntax
+        run: bash -n scripts/c5_profile.sh
+      - name: Test C5 V4L2 sysfs inventory (offline only)
+        run: |
+          sh -n scripts/c5_v4l2_sysfs_inventory.sh
+          python3 -m unittest discover -s scripts -p test_c5_v4l2_sysfs_inventory.py -v
+      - name: Verify C5 per-node dev_debug trace syntax
+        run: sh -n scripts/c5_v4l2_dev_debug_trace.sh
+      - name: Verify C5 built-in provenance collector syntax
+        run: sh -n scripts/c5_v4l2_builtin_provenance.sh
+      - name: Test C5 profile importer (offline)
+        run: python3 -m unittest discover -s scripts -p test_c5_profile_import.py -v
+      - name: Validate C5 LS2 registration-only role (offline)
+        run: python3 -m unittest discover -s scripts -p test_c5_ls2_role.py -v
+      - name: Test LG native C++ exception boundary
+        run: |
+          c++ -std=c++11 -Wall -Wextra -Werror -O2 \
+            native/lg_histogram_guard.cpp native/test_histogram_guard.cpp \
+            -o "$RUNNER_TEMP/test_histogram_guard"
+          "$RUNNER_TEMP/test_histogram_guard"
+          c++ -std=c++11 -Wall -Wextra -Werror -O2 \
+            native/lg_frame_guard.cpp native/test_frame_guard.cpp \
+            -o "$RUNNER_TEMP/test_frame_guard"
+          "$RUNNER_TEMP/test_frame_guard"
+      - name: Enforce rustfmt
+        run: cargo fmt --all -- --check
+      - name: Run locked Rust test suite
+        run: cargo nextest run --locked
+      - name: Clippy (deny warnings)
+        run: cargo clippy --locked --bin lg-hue-sync -- -D warnings
       - name: Validate embedded dashboard JavaScript
         run: perl -0777 -ne 'print $1 if /<script>(.*)<\/script>/s' src/web/ui.html | node --check -
+      - name: Ensure no generated file changes
+        run: git diff --check
 
   webos-target:
-    runs-on: ubuntu-latest
+    name: ARMv7 / webOS glibc 2.28 ABI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
-      - run: make build
-      - name: Verify ARMv7 Linux artifact
-        run: file target/armv7-unknown-linux-gnueabi/release/lg-hue-sync | grep -q 'ELF 32-bit.*ARM'
+        with:
+          persist-credentials: false
+      - name: Verify preinstalled cross-build host tools
+        run: |
+          for tool in docker make file readelf python3; do
+            command -v "$tool"
+          done
+          docker info
+      - name: Build 32-bit ARMv7 binary using Debian Buster toolchain
+        run: make build
+      - name: Verify ARM ELF machine and required glibc versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=target/armv7-unknown-linux-gnueabi/release/lg-hue-sync
+          test -s "$BIN"
+          file "$BIN"
+          file "$BIN" | grep -Eq 'ELF 32-bit.*ARM'
+          readelf -h "$BIN"
+          readelf -W --dyn-syms "$BIN" | grep -Fq 'printLog'
+          readelf -W --version-info "$BIN" > "$RUNNER_TEMP/required-glibc.txt"
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+          text = (pathlib.Path(os.environ['RUNNER_TEMP']) / 'required-glibc.txt').read_text()
+          required = {tuple(map(int, version.split('.')))
+                      for version in re.findall(r'GLIBC_([0-9]+\.[0-9]+(?:\.[0-9]+)?)', text)}
+          if not required:
+              raise SystemExit('FAIL: no GLIBC requirements found; inspect ELF ABI')
+          too_new = sorted(v for v in required if v > (2, 28))
+          print('GLIBC requirements:', sorted(required))
+          if too_new:
+              raise SystemExit('FAIL: requires GLIBC newer than 2.28: ' + str(too_new))
+          print('PASS: ARMv7 ELF and GLIBC <= 2.28')
+          PY
+      - name: Upload short-lived C5 ARMv7 histogram test binary
+        if: github.ref == 'refs/heads/feature/vendor-neutral-wled-drm-first'
+        uses: actions/upload-artifact@v4
+        with:
+          name: c5-histogram-probe-armv7
+          path: target/armv7-unknown-linux-gnueabi/release/lg-hue-sync
+          retention-days: 7
+          if-no-files-found: error
       - name: Stage release binary
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -52,7 +153,7 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, webos-target]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:

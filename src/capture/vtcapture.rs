@@ -63,7 +63,184 @@ type FnVtCaptureCurrentCaptureBuffInfo =
 type FnVtCaptureStop = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
 type FnVtCapturePostprocess = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
 type FnVtCaptureFinalize = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
-type FnVtCaptureRelease = unsafe extern "C" fn(*mut c_void) -> c_int;
+// Native vtCapture_release dispatches driver cleanup via the vtable; it has
+// no documented integer status on the audited C5. Never interpret r0 as rc.
+type FnVtCaptureRelease = unsafe extern "C" fn(*mut c_void);
+
+// The C5's native C++ code can throw during LS2/Resource Manager registration.
+// Every Linux native frame call, including cleanup and Drop, goes through the
+// typed noexcept C++ barrier. No vendor C++ exception crosses Rust FFI.
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn lg_frame_guard_create(
+        f: FnVtCaptureCreate,
+        out: *mut *mut c_void,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_init(
+        f: FnVtCaptureInit,
+        driver: *mut c_void,
+        caller: *const c_char,
+        client: *mut c_char,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_preprocess(
+        f: FnVtCapturePreprocess,
+        driver: *mut c_void,
+        client: *const c_char,
+        props: *const LibVtCaptureProperties,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_plane_info(
+        f: FnVtCapturePlaneInfo,
+        driver: *mut c_void,
+        client: *const c_char,
+        plane: *mut LibVtCapturePlaneInfo,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_process(
+        f: FnVtCaptureProcess,
+        driver: *mut c_void,
+        client: *const c_char,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_current_buffer(
+        f: FnVtCaptureCurrentCaptureBuffInfo,
+        driver: *mut c_void,
+        buffer: *mut LibVtCaptureBufferInfo,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_stop(
+        f: FnVtCaptureStop,
+        driver: *mut c_void,
+        client: *const c_char,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_postprocess(
+        f: FnVtCapturePostprocess,
+        driver: *mut c_void,
+        client: *const c_char,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_finalize(
+        f: FnVtCaptureFinalize,
+        driver: *mut c_void,
+        client: *const c_char,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_release(
+        f: FnVtCaptureRelease,
+        driver: *mut c_void,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+}
+
+#[cfg(target_os = "linux")]
+fn frame_guard_check(operation: &str, boundary: c_int, error: &[c_char; 256]) -> Result<()> {
+    if boundary != 0 {
+        let message = unsafe { CStr::from_ptr(error.as_ptr()) }.to_string_lossy();
+        return Err(anyhow!(
+            "LG C++ frame operation {operation} threw or was rejected by guard: {message}"
+        ));
+    }
+    Ok(())
+}
+
+macro_rules! frame_native {
+    ($guard:ident, $operation:literal, $fn_ptr:expr $(, $arg:expr)* $(,)?) => {{
+        #[cfg(target_os = "linux")]
+        {
+            let mut rc = 0 as c_int;
+            let mut error = [0 as c_char; 256];
+            // This macro is invoked both inside and outside existing unsafe
+            // scopes. The local FFI boundary remains explicit in both cases.
+            #[allow(unused_unsafe)]
+            let outcome = unsafe {
+                $guard($fn_ptr, $($arg,)* &mut rc, error.as_mut_ptr(), error.len())
+            };
+            frame_guard_check($operation, outcome, &error).map(|()| rc)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok::<c_int, anyhow::Error>(unsafe { ($fn_ptr)($($arg),*) })
+        }
+    }};
+}
+
+// The C5's release entry point tail-dispatches via the driver vtable.
+// It is a cleanup operation, NOT an integer-returning status API.
+// Report only the C++ guard boundary result, including exceptions.
+fn frame_release(f: FnVtCaptureRelease, driver: *mut c_void) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut error = [0 as c_char; 256];
+        let outcome = unsafe { lg_frame_guard_release(f, driver, error.as_mut_ptr(), error.len()) };
+        frame_guard_check("release", outcome, &error)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        unsafe { f(driver) };
+        Ok(())
+    }
+}
+
+unsafe fn frame_create(f: FnVtCaptureCreate) -> Result<*mut c_void> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut out = std::ptr::null_mut();
+        let mut error = [0 as c_char; 256];
+        let outcome = lg_frame_guard_create(f, &mut out, error.as_mut_ptr(), error.len());
+        frame_guard_check("create", outcome, &error)?;
+        Ok(out)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(f())
+    }
+}
+
+// Reject malformed or oversized metadata before native buffer pointers are dereferenced.
+// A valid C5 layout must be established independently of our requested resolution.
+fn checked_plane_dimensions(plane: &LibVtCapturePlaneInfo) -> Result<(u32, u32, u32)> {
+    if plane.plane_w <= 0 || plane.plane_h <= 0 || plane.stride <= 0 {
+        return Err(anyhow!("LG frame plane has absent dimensions or stride"));
+    }
+    let width = plane.plane_w as u32;
+    let height = plane.plane_h as u32;
+    let stride = plane.stride as u32;
+    if width > 4096
+        || height > 2160
+        || stride > 8192
+        || !width.is_multiple_of(2)
+        || !height.is_multiple_of(2)
+        || !stride.is_multiple_of(2)
+        || stride < width
+    {
+        return Err(anyhow!(
+            "LG frame plane exceeds bounded NV12 geometry or is misaligned"
+        ));
+    }
+    nv12_lengths(width, height, stride)?;
+    Ok((width, height, stride))
+}
 
 /// Native libvtcapture driver implementation for LG webOS 6.x (LG C1 OLED).
 pub struct VtCapture {
@@ -145,7 +322,859 @@ fn central_nv12_stats(
     })
 }
 
+// A descriptor is metadata only. Presence/length checks cannot establish
+// whether raw native pointers refer to mapped or accessible memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DescriptorSummary {
+    y_present: bool,
+    uv_present: bool,
+    y_size: usize,
+    uv_size: usize,
+}
+
+fn validate_buffer_descriptor(
+    descriptor: &LibVtCaptureBufferInfo,
+    layout: (u32, u32, u32),
+) -> Result<DescriptorSummary> {
+    let (width, height, stride) = layout;
+    let (minimum_y, minimum_uv, _) = nv12_lengths(width, height, stride)?;
+    let y_present = !descriptor.start_addr0.is_null();
+    let uv_present = !descriptor.start_addr1.is_null();
+    if !y_present || !uv_present {
+        return Err(anyhow!(
+            "native descriptor missing Y or UV pointer (y_present={y_present} uv_present={uv_present}); no pointer dereferenced"
+        ));
+    }
+    if descriptor.size0 < 0 || descriptor.size1 < 0 {
+        return Err(anyhow!("native buffer descriptor has negative plane size"));
+    }
+    let y_size = descriptor.size0 as usize;
+    let uv_size = descriptor.size1 as usize;
+    // Bound corrupted metadata; these values are NOT trusted allocation sizes.
+    if y_size < minimum_y || uv_size < minimum_uv {
+        return Err(anyhow!(
+            "native buffer descriptor plane sizes smaller than required 320x180 layout"
+        ));
+    }
+    if y_size > 16 * 1024 * 1024 || uv_size > 16 * 1024 * 1024 {
+        return Err(anyhow!(
+            "native buffer descriptor sizes exceed sanity limits"
+        ));
+    }
+    Ok(DescriptorSummary {
+        y_present,
+        uv_present,
+        y_size,
+        uv_size,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReadableSpan {
+    start: usize,
+    end: usize,
+}
+
+/// Interpret /proc/self/maps as a bounded, read-only VMA inventory. File
+/// names, absolute addresses and mapping identities are never logged.
+fn parse_readable_spans(maps: &str) -> Result<Vec<ReadableSpan>> {
+    let mut spans = Vec::new();
+    for line in maps.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split_whitespace();
+        let range = fields.next().ok_or_else(|| anyhow!("missing VMA range"))?;
+        let perms = fields
+            .next()
+            .ok_or_else(|| anyhow!("missing VMA permissions"))?;
+        let (start, end) = range
+            .split_once('-')
+            .ok_or_else(|| anyhow!("malformed VMA address range"))?;
+        let start = usize::from_str_radix(start, 16).context("invalid VMA starting address")?;
+        let end = usize::from_str_radix(end, 16).context("invalid VMA ending address")?;
+        if start >= end {
+            return Err(anyhow!("invalid VMA address ordering"));
+        }
+        if perms.as_bytes().first() == Some(&b'r') {
+            spans.push(ReadableSpan { start, end });
+        }
+    }
+    spans.sort_unstable_by_key(|span| span.start);
+    Ok(spans)
+}
+
+/// Checking the address is arithmetic only: NEVER create a pointer slice or
+/// dereference the vendor-provided address. Adjacent readable VMAs may cover
+/// one buffer, but an unreadable gap fails closed.
+fn span_is_readable(addr: usize, size: usize, spans: &[ReadableSpan]) -> bool {
+    if addr == 0 || size == 0 {
+        return false;
+    }
+    let Some(end) = addr.checked_add(size) else {
+        return false;
+    };
+    let mut cursor = addr;
+    for span in spans {
+        if span.end <= cursor {
+            continue;
+        }
+        if span.start > cursor {
+            return false;
+        }
+        cursor = cursor.max(span.end);
+        if cursor >= end {
+            return true;
+        }
+    }
+    false
+}
+
+/// This proves only *reported mapping coverage at the time of inspection*.
+/// It does not prove the pages are resident, correctly owned, synchronized,
+/// DRM-clear, or safe for subsequent raw Rust pointer dereferencing.
+fn check_descriptor_readable_mappings(
+    descriptor: &LibVtCaptureBufferInfo,
+    summary: DescriptorSummary,
+    maps: &str,
+) -> Result<()> {
+    let spans = parse_readable_spans(maps)?;
+    let y_addr = descriptor.start_addr0 as usize;
+    let uv_addr = descriptor.start_addr1 as usize;
+    let y_end = y_addr
+        .checked_add(summary.y_size)
+        .ok_or_else(|| anyhow!("Y range overflow"))?;
+    let uv_end = uv_addr
+        .checked_add(summary.uv_size)
+        .ok_or_else(|| anyhow!("UV range overflow"))?;
+    if y_addr < uv_end && uv_addr < y_end {
+        return Err(anyhow!("native Y and UV descriptor ranges overlap"));
+    }
+    if !span_is_readable(y_addr, summary.y_size, &spans) {
+        return Err(anyhow!(
+            "native Y descriptor is not fully covered by readable mappings"
+        ));
+    }
+    if !span_is_readable(uv_addr, summary.uv_size, &spans) {
+        return Err(anyhow!(
+            "native UV descriptor is not fully covered by readable mappings"
+        ));
+    }
+    Ok(())
+}
+
+/// /proc/self/smaps is read only. Its VmFlags can identify device-backed
+/// mappings whose "r" permission alone does not guarantee GUP copyability.
+/// Never report addresses, file names, offsets, or frame contents.
+// Shared result type keeps the guarded native probe boundaries explicit.
+type C5NativeProbeResult = (
+    (u32, u32, u32),
+    Option<DescriptorSummary>,
+    Option<(VmaAttributes, VmaAttributes)>,
+);
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct VmaAttributes {
+    io: bool,
+    pf: bool,
+    mm: bool,
+    dd: bool,
+    rss_nonzero: bool,
+    segments: usize,
+}
+
+#[derive(Debug)]
+struct SmapsSpan {
+    start: usize,
+    end: usize,
+    readable: bool,
+    has_flags: bool,
+    io: bool,
+    pf: bool,
+    mm: bool,
+    dd: bool,
+    rss_nonzero: bool,
+}
+
+fn smaps_header(line: &str) -> Option<(usize, usize, bool)> {
+    let mut fields = line.split_whitespace();
+    let range = fields.next()?;
+    let perms = fields.next()?;
+    let (start, end) = range.split_once('-')?;
+    if start.is_empty()
+        || end.is_empty()
+        || !start.bytes().all(|b| b.is_ascii_hexdigit())
+        || !end.bytes().all(|b| b.is_ascii_hexdigit())
+        || perms.len() != 4
+    {
+        return None;
+    }
+    let start = usize::from_str_radix(start, 16).ok()?;
+    let end = usize::from_str_radix(end, 16).ok()?;
+    if start >= end {
+        return None;
+    }
+    Some((start, end, perms.starts_with('r')))
+}
+
+fn parse_smaps_spans(smaps: &str) -> Result<Vec<SmapsSpan>> {
+    let mut regions: Vec<SmapsSpan> = Vec::new();
+    for line in smaps.lines() {
+        if let Some((start, end, readable)) = smaps_header(line) {
+            regions.push(SmapsSpan {
+                start,
+                end,
+                readable,
+                has_flags: false,
+                io: false,
+                pf: false,
+                mm: false,
+                dd: false,
+                rss_nonzero: false,
+            });
+            continue;
+        }
+        let Some(last) = regions.last_mut() else {
+            continue;
+        };
+        if let Some(flags) = line.strip_prefix("VmFlags:") {
+            last.has_flags = true;
+            for flag in flags.split_whitespace() {
+                match flag {
+                    "io" => last.io = true,
+                    "pf" => last.pf = true,
+                    "mm" => last.mm = true,
+                    "dd" => last.dd = true,
+                    _ => {}
+                }
+            }
+        } else if let Some(rss) = line.strip_prefix("Rss:") {
+            let value = rss
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| anyhow!("smaps RSS value is missing"))?
+                .parse::<u64>()
+                .context("smaps RSS value is invalid")?;
+            last.rss_nonzero = value > 0;
+        }
+    }
+    regions.sort_unstable_by_key(|span| span.start);
+    Ok(regions)
+}
+
+/// Cover the requested range completely using readable VMAs that expose
+/// VmFlags. No memory reads or GUP attempts. Names/locations are never logged.
+fn summarize_vma_range(addr: usize, len: usize, regions: &[SmapsSpan]) -> Result<VmaAttributes> {
+    if addr == 0 || len == 0 {
+        return Err(anyhow!("invalid VMA sample range"));
+    }
+    let end = addr
+        .checked_add(len)
+        .ok_or_else(|| anyhow!("VMA sample range overflow"))?;
+    let mut cursor = addr;
+    let mut summary = VmaAttributes::default();
+    for region in regions {
+        if region.end <= cursor {
+            continue;
+        }
+        if region.start > cursor {
+            return Err(anyhow!("VMA sample range has a mapping gap"));
+        }
+        if !region.readable || !region.has_flags {
+            return Err(anyhow!("VMA sample is unreadable or VmFlags are absent"));
+        }
+        summary.io |= region.io;
+        summary.pf |= region.pf;
+        summary.mm |= region.mm;
+        summary.dd |= region.dd;
+        summary.rss_nonzero |= region.rss_nonzero;
+        summary.segments += 1;
+        cursor = cursor.max(region.end);
+        if cursor >= end {
+            return Ok(summary);
+        }
+    }
+    Err(anyhow!("VMA sample range is not fully mapped"))
+}
+
+fn describe_descriptor_vmas(
+    descriptor: &LibVtCaptureBufferInfo,
+    summary: DescriptorSummary,
+    smaps: &str,
+) -> Result<(VmaAttributes, VmaAttributes)> {
+    let regions = parse_smaps_spans(smaps)?;
+    let y = summarize_vma_range(descriptor.start_addr0 as usize, summary.y_size, &regions)?;
+    let uv = summarize_vma_range(descriptor.start_addr1 as usize, summary.uv_size, &regions)?;
+    Ok((y, uv))
+}
+
+/// Refuse kernel-mediated copying from device/PFN-backed VMAs before
+/// process_vm_readv. This is not evidence that other mappings are safe.
+fn reject_special_vmas_for_kernel_copy(y: VmaAttributes, uv: VmaAttributes) -> Result<()> {
+    if y.io || y.pf || y.mm || uv.io || uv.pf || uv.mm {
+        return Err(anyhow!(
+            "kernel-copy refused before syscall: IO/PFN/mixed VMA requires an audited driver capture interface"
+        ));
+    }
+    Ok(())
+}
+
+/// Select just one central Y sample and the corresponding 2-byte NV12
+/// chroma pair. Offset arithmetic is performed on integers, not pointers.
+fn checked_central_offsets(
+    layout: (u32, u32, u32),
+    summary: DescriptorSummary,
+) -> Result<(usize, usize)> {
+    let (width, height, stride) = layout;
+    if (width, height, stride) != (320, 180, 320) {
+        return Err(anyhow!("unexpected native frame geometry for 3-byte probe"));
+    }
+    let x = (width / 2) as usize;
+    let y = (height / 2) as usize;
+    let stride = stride as usize;
+    let y_offset = y
+        .checked_mul(stride)
+        .and_then(|v| v.checked_add(x))
+        .ok_or_else(|| anyhow!("Y sample offset overflow"))?;
+    let uv_offset = (y / 2)
+        .checked_mul(stride)
+        .and_then(|v| v.checked_add(x & !1))
+        .ok_or_else(|| anyhow!("UV sample offset overflow"))?;
+    if y_offset >= summary.y_size
+        || uv_offset
+            .checked_add(2)
+            .is_none_or(|end| end > summary.uv_size)
+    {
+        return Err(anyhow!("3-byte probe sample outside reported plane bounds"));
+    }
+    Ok((y_offset, uv_offset))
+}
+
+/// Use the kernel copy API instead of dereferencing opaque vendor pointers.
+/// No fallback to /proc/self/mem, direct slices, memcpy or unsafe read.
+#[cfg(target_os = "linux")]
+fn copy_self_via_kernel(addr: usize, dest: &mut [u8]) -> Result<()> {
+    if addr == 0 || dest.is_empty() || dest.len() > 2 || addr.checked_add(dest.len()).is_none() {
+        return Err(anyhow!("invalid kernel-copy sample request"));
+    }
+    let local = libc::iovec {
+        iov_base: dest.as_mut_ptr().cast::<c_void>(),
+        iov_len: dest.len(),
+    };
+    // An opaque integer is handed to the kernel. It is never dereferenced
+    // by Rust or converted into a Rust reference.
+    let remote = libc::iovec {
+        iov_base: addr as *mut c_void,
+        iov_len: dest.len(),
+    };
+    let copied = unsafe { libc::process_vm_readv(libc::getpid(), &local, 1, &remote, 1, 0) };
+    if copied == dest.len() as isize {
+        Ok(())
+    } else {
+        dest.fill(0);
+        if copied < 0 {
+            Err(anyhow!(
+                "kernel-mediated self-copy refused: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            Err(anyhow!("kernel-mediated self-copy returned short read"))
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn copy_self_via_kernel(_addr: usize, _dest: &mut [u8]) -> Result<()> {
+    Err(anyhow!("kernel-mediated sample requires Linux"))
+}
+
+/// Exactly three ephemeral bytes: one Y and one U/V pair, sampled from a
+/// known-clear test source. Never log data, keep pixels, hash or send output.
+/// Cleanup of native VT remains with C5MetadataSession regardless of result.
+fn sample_three_bytes_kernel_only(
+    descriptor: &LibVtCaptureBufferInfo,
+    layout: (u32, u32, u32),
+    summary: DescriptorSummary,
+) -> Result<()> {
+    let (y_offset, uv_offset) = checked_central_offsets(layout, summary)?;
+    let y = (descriptor.start_addr0 as usize)
+        .checked_add(y_offset)
+        .ok_or_else(|| anyhow!("Y sample pointer arithmetic overflow"))?;
+    let uv = (descriptor.start_addr1 as usize)
+        .checked_add(uv_offset)
+        .ok_or_else(|| anyhow!("UV sample pointer arithmetic overflow"))?;
+    let mut y_byte = [0u8; 1];
+    let mut uv_bytes = [0u8; 2];
+    let copied = (|| -> Result<()> {
+        copy_self_via_kernel(y, &mut y_byte)?;
+        copy_self_via_kernel(uv, &mut uv_bytes)
+    })();
+    y_byte.fill(0);
+    uv_bytes.fill(0);
+    copied
+}
+
+/**
+ * One-shot native probe owner. Once preprocess has been attempted, even a
+ * native error may have partially armed the scaler: attempt postprocess before
+ * finalize and release. Only the selected explicit diagnostic may call process or descriptor APIs; no native buffer is ever dereferenced.
+ */
+struct C5MetadataSession {
+    driver: *mut c_void,
+    client_id: [u8; 128],
+    initialized: bool,
+    preprocess_attempted: bool,
+    process_attempted: bool,
+    released: bool,
+    stop: FnVtCaptureStop,
+    postprocess: FnVtCapturePostprocess,
+    finalize: FnVtCaptureFinalize,
+    release: FnVtCaptureRelease,
+}
+
+impl C5MetadataSession {
+    fn cleanup(&mut self) -> Result<()> {
+        if self.released {
+            return Ok(());
+        }
+        let mut issues = Vec::new();
+        let client = self.client_id.as_ptr() as *const c_char;
+        // A failed/throwing process may have partially started capture.
+        // Attempt stop before postprocess in that case; never read buffers.
+        if self.process_attempted {
+            match frame_native!(lg_frame_guard_stop, "stop", self.stop, self.driver, client) {
+                Ok(0) => {}
+                Ok(code) => issues.push(format!("stop returned {code}")),
+                Err(error) => issues.push(format!("stop guard: {error:#}")),
+            }
+        }
+        if self.preprocess_attempted {
+            match frame_native!(
+                lg_frame_guard_postprocess,
+                "postprocess",
+                self.postprocess,
+                self.driver,
+                client
+            ) {
+                Ok(0) => {}
+                Ok(code) => issues.push(format!("postprocess returned {code}")),
+                Err(error) => issues.push(format!("postprocess guard: {error:#}")),
+            }
+        }
+        if self.initialized {
+            match frame_native!(
+                lg_frame_guard_finalize,
+                "finalize",
+                self.finalize,
+                self.driver,
+                client
+            ) {
+                Ok(0) => {}
+                Ok(code) => issues.push(format!("finalize returned {code}")),
+                Err(error) => issues.push(format!("finalize guard: {error:#}")),
+            }
+        }
+
+        // Never repeat a release, even if its native destructor threw after
+        // partially destroying the driver. The C++ guard handles exceptions.
+        self.released = true;
+        if let Err(error) = frame_release(self.release, self.driver) {
+            issues.push(format!("release guard: {error:#}"));
+        }
+        self.driver = std::ptr::null_mut();
+
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!("C5 metadata probe cleanup: {}", issues.join("; ")))
+        }
+    }
+}
+
+impl Drop for C5MetadataSession {
+    fn drop(&mut self) {
+        if !self.released {
+            if let Err(error) = self.cleanup() {
+                warn!("C5 metadata probe fallback cleanup: {error:#}");
+            }
+        }
+    }
+}
+
 impl VtCapture {
+    /// Bounded, explicit native *initialization-only* diagnostic.
+    ///
+    /// This may acquire LG Resource Manager / LS2 ownership temporarily, so
+    /// callers MUST verify the source is positively classified Clear first.
+    /// Never preprocess, select a capture mode, start a stream, request buffer
+    /// metadata, or read frame pixels. Respect all vendor permission refusals.
+    pub fn probe_init_only() -> Result<()> {
+        if !Path::new(LIBVTCAPTURE_PATH).exists() {
+            return Err(anyhow!("libvtcapture is absent"));
+        }
+        let lib = unsafe { Library::new(LIBVTCAPTURE_PATH) }
+            .context("failed to load native LG capture library for init-only probe")?;
+        let caller = CString::new("org.webosbrew.lg-hue-sync")?;
+        let mut client_id = [0u8; 128];
+        client_id[0] = b'0';
+        client_id[1] = b'0';
+
+        unsafe {
+            let create: Symbol<FnVtCaptureCreate> = lib.get(b"vtCapture_create\0")?;
+            let init: Symbol<FnVtCaptureInit> = lib.get(b"vtCapture_init\0")?;
+            let finalize: Symbol<FnVtCaptureFinalize> = lib.get(b"vtCapture_finalize\0")?;
+            let release: Symbol<FnVtCaptureRelease> = lib.get(b"vtCapture_release\0")?;
+
+            let driver = frame_create(*create)?;
+            if driver.is_null() {
+                return Err(anyhow!("vtCapture_create returned null"));
+            }
+
+            let init_result = frame_native!(
+                lg_frame_guard_init,
+                "init",
+                *init,
+                driver,
+                caller.as_ptr(),
+                client_id.as_mut_ptr() as *mut c_char
+            );
+
+            // Only an initialized client may be finalized. A denied or
+            // throwing init is released, never retried with another caller.
+            let finalize_result = if matches!(init_result, Ok(0)) {
+                Some(frame_native!(
+                    lg_frame_guard_finalize,
+                    "finalize",
+                    *finalize,
+                    driver,
+                    client_id.as_ptr() as *const c_char
+                ))
+            } else {
+                None
+            };
+
+            // Attempt release even if init/finalize returned an error.
+            let release_result = frame_release(*release, driver);
+
+            let init_code = init_result?;
+            if init_code != 0 {
+                if let Err(error) = release_result {
+                    warn!("Native release after init refusal: {error:#}");
+                }
+                return Err(NativeCaptureError {
+                    backend: "libvtcapture",
+                    operation: "vtCapture_init",
+                    code: init_code,
+                }
+                .into());
+            }
+
+            let final_code = finalize_result.expect("finalize required after a successful init")?;
+            if final_code != 0 {
+                return Err(NativeCaptureError {
+                    backend: "libvtcapture",
+                    operation: "vtCapture_finalize",
+                    code: final_code,
+                }
+                .into());
+            }
+            // A completed, non-throwing release has no integer status.
+            release_result?;
+            info!("C5_FRAME_INIT_ONLY_PASS: initialized and released; no preprocess or frame read");
+            Ok(())
+        }
+    }
+
+    /// Single, opt-in preprocessing/plane-layout diagnostic. Preprocess may
+    /// briefly arm the LG display-output scaler; no frame processing, buffer
+    /// requests, pixel reads, output devices, or mode fallbacks are permitted.
+    /// Call only after three fresh, positively Clear media classifications.
+    pub fn probe_preprocess_metadata() -> Result<()> {
+        Self::probe_preprocess_once(false, false, false, false, false)
+    }
+
+    /// One native process invocation on a known-clear display-output source.
+    /// No buffer metadata requests or pixel reads. Process MAY enable a stream.
+    pub fn probe_process_no_buffers() -> Result<()> {
+        Self::probe_preprocess_once(true, false, false, false, false)
+    }
+
+    /// Exactly one request for the native buffer *descriptor*, not its bytes.
+    /// The returned pointers are treated as opaque: never logged, copied or
+    /// dereferenced. The source must have been independently verified Clear.
+    pub fn probe_buffer_descriptor_once() -> Result<()> {
+        Self::probe_preprocess_once(true, true, false, false, false)
+    }
+
+    /// Validate the Y and UV descriptor address ranges against readable VMAs
+    /// while the native capture session is alive. No pixel loads or copies.
+    pub fn probe_buffer_mappings_once() -> Result<()> {
+        Self::probe_preprocess_once(true, true, true, false, false)
+    }
+
+    /// First tightly bounded content access: three bytes copied by the
+    /// kernel from the two opaque planes, with no logging or persistence.
+    pub fn probe_three_byte_kernel_copy_once() -> Result<()> {
+        Self::probe_preprocess_once(true, true, true, true, false)
+    }
+
+    /// After an EFAULT, inspect live native-buffer VMA flags ONLY. No readv,
+    /// direct pointer dereference, frame copying or permissions workaround.
+    pub fn probe_buffer_vma_flags_once() -> Result<()> {
+        Self::probe_preprocess_once(true, true, true, false, true)
+    }
+
+    fn probe_preprocess_once(
+        process_once: bool,
+        descriptor_once: bool,
+        mapping_once: bool,
+        sample_once: bool,
+        vma_flags_once: bool,
+    ) -> Result<()> {
+        if mapping_once && (!process_once || !descriptor_once) {
+            return Err(anyhow!(
+                "mapping-only probe requires a processed descriptor"
+            ));
+        }
+        if sample_once && !mapping_once {
+            return Err(anyhow!(
+                "bounded sample requires readable mapping validation"
+            ));
+        }
+        if vma_flags_once && (!mapping_once || sample_once) {
+            return Err(anyhow!("VMA flag inspection requires mapping-only mode"));
+        }
+        let lib = unsafe { Library::new(LIBVTCAPTURE_PATH) }
+            .context("unable to load LG VT library for metadata-only probe")?;
+        let caller = CString::new("org.webosbrew.lg-hue-sync")?;
+
+        // Resolve all required symbols before creating the native driver.
+        unsafe {
+            let create: Symbol<FnVtCaptureCreate> = lib.get(b"vtCapture_create\0")?;
+            let init: Symbol<FnVtCaptureInit> = lib.get(b"vtCapture_init\0")?;
+            let preprocess: Symbol<FnVtCapturePreprocess> = lib.get(b"vtCapture_preprocess\0")?;
+            let plane_info: Symbol<FnVtCapturePlaneInfo> = lib.get(b"vtCapture_planeInfo\0")?;
+            let process: Symbol<FnVtCaptureProcess> = lib.get(b"vtCapture_process\0")?;
+            let current_buffer: Symbol<FnVtCaptureCurrentCaptureBuffInfo> =
+                lib.get(b"vtCapture_currentCaptureBuffInfo\0")?;
+            let stop: Symbol<FnVtCaptureStop> = lib.get(b"vtCapture_stop\0")?;
+            let postprocess: Symbol<FnVtCapturePostprocess> =
+                lib.get(b"vtCapture_postprocess\0")?;
+            let finalize: Symbol<FnVtCaptureFinalize> = lib.get(b"vtCapture_finalize\0")?;
+            let release: Symbol<FnVtCaptureRelease> = lib.get(b"vtCapture_release\0")?;
+
+            let driver = frame_create(*create)?;
+            if driver.is_null() {
+                return Err(anyhow!("vtCapture_create returned null"));
+            }
+
+            let mut session = C5MetadataSession {
+                driver,
+                client_id: [0u8; 128],
+                initialized: false,
+                preprocess_attempted: false,
+                process_attempted: false,
+                released: false,
+                stop: *stop,
+                postprocess: *postprocess,
+                finalize: *finalize,
+                release: *release,
+            };
+            session.client_id[..2].copy_from_slice(b"00");
+
+            // The closure must not return directly from the outer scope:
+            // explicit cleanup has to run for both success and native refusal.
+            let operation = (|| -> Result<C5NativeProbeResult> {
+                let init_code = frame_native!(
+                    lg_frame_guard_init,
+                    "init",
+                    *init,
+                    session.driver,
+                    caller.as_ptr(),
+                    session.client_id.as_mut_ptr() as *mut c_char
+                )?;
+                if init_code != 0 {
+                    return Err(NativeCaptureError {
+                        backend: "libvtcapture",
+                        operation: "vtCapture_init",
+                        code: init_code,
+                    }
+                    .into());
+                }
+                session.initialized = true;
+                CStr::from_bytes_until_nul(&session.client_id)
+                    .context("native init returned an unterminated client ID")?;
+
+                // One fixed, low-resolution display-output request. Never try
+                // HDMI/scaler-input alternatives after an error or refusal.
+                let props = LibVtCaptureProperties {
+                    dump: 2,
+                    loc_x: 0,
+                    loc_y: 0,
+                    reg_w: 320,
+                    reg_h: 180,
+                    buf_cnt: 3,
+                    frm: 30,
+                };
+                session.preprocess_attempted = true;
+                let prep_code = frame_native!(
+                    lg_frame_guard_preprocess,
+                    "preprocess",
+                    *preprocess,
+                    session.driver,
+                    session.client_id.as_ptr() as *const c_char,
+                    &props
+                )?;
+                if prep_code != 0 {
+                    return Err(NativeCaptureError {
+                        backend: "libvtcapture",
+                        operation: "vtCapture_preprocess",
+                        code: prep_code,
+                    }
+                    .into());
+                }
+
+                let mut plane = LibVtCapturePlaneInfo::default();
+                let plane_code = frame_native!(
+                    lg_frame_guard_plane_info,
+                    "plane-info",
+                    *plane_info,
+                    session.driver,
+                    session.client_id.as_ptr() as *const c_char,
+                    &mut plane
+                )?;
+                if plane_code != 0 {
+                    return Err(NativeCaptureError {
+                        backend: "libvtcapture",
+                        operation: "vtCapture_planeInfo",
+                        code: plane_code,
+                    }
+                    .into());
+                }
+                let layout = checked_plane_dimensions(&plane)
+                    .context("native plane metadata failed bounds validation")?;
+
+                if process_once {
+                    // Mark attempted before entry: a native error or exception
+                    // may occur after partial stream activation.
+                    session.process_attempted = true;
+                    let process_code = frame_native!(
+                        lg_frame_guard_process,
+                        "process",
+                        *process,
+                        session.driver,
+                        session.client_id.as_ptr() as *const c_char
+                    )?;
+                    if process_code != 0 {
+                        return Err(NativeCaptureError {
+                            backend: "libvtcapture",
+                            operation: "vtCapture_process",
+                            code: process_code,
+                        }
+                        .into());
+                    }
+                }
+
+                // One native descriptor fetch; no retry, pointer arithmetic,
+                // buffer reading, slices, hashes, or image/light output.
+                // An error code is terminal and cleanup is still performed.
+                let mut vma_report = None;
+                let summary = if descriptor_once {
+                    let mut descriptor = LibVtCaptureBufferInfo {
+                        start_addr0: std::ptr::null_mut(),
+                        start_addr1: std::ptr::null_mut(),
+                        size0: 0,
+                        size1: 0,
+                    };
+                    let rc = frame_native!(
+                        lg_frame_guard_current_buffer,
+                        "current-buffer-descriptor",
+                        *current_buffer,
+                        session.driver,
+                        &mut descriptor
+                    )?;
+                    if rc != 0 {
+                        return Err(NativeCaptureError {
+                            backend: "libvtcapture",
+                            operation: "vtCapture_currentCaptureBuffInfo",
+                            code: rc,
+                        }
+                        .into());
+                    }
+                    let validated = validate_buffer_descriptor(&descriptor, layout)?;
+                    if mapping_once {
+                        let maps = std::fs::read_to_string("/proc/self/maps")
+                            .context("cannot inspect own process VMA map")?;
+                        check_descriptor_readable_mappings(&descriptor, validated, &maps)?;
+                    }
+                    if vma_flags_once {
+                        let smaps = std::fs::read_to_string("/proc/self/smaps")
+                            .context("cannot read own /proc/self/smaps")?;
+                        vma_report =
+                            Some(describe_descriptor_vmas(&descriptor, validated, &smaps)?);
+                    }
+                    if sample_once {
+                        let smaps = std::fs::read_to_string("/proc/self/smaps")
+                            .context("cannot inspect own VMA flags before kernel copy")?;
+                        let (y, uv) = describe_descriptor_vmas(&descriptor, validated, &smaps)?;
+                        reject_special_vmas_for_kernel_copy(y, uv)?;
+                        sample_three_bytes_kernel_only(&descriptor, layout, validated)?;
+                    }
+                    Some(validated)
+                } else {
+                    None
+                };
+                Ok((layout, summary, vma_report))
+            })();
+
+            let cleanup = session.cleanup();
+            match (operation, cleanup) {
+                (Ok(((width, height, stride), summary, vma_report)), Ok(())) => {
+                    if let Some((y, uv)) = vma_report {
+                        info!(
+                            "C5_FRAME_VMA_FLAGS_PASS: display-output plane={}x{} stride={} y_io={} y_pf={} y_mm={} y_dd={} y_rss_nonzero={} y_segments={} uv_io={} uv_pf={} uv_mm={} uv_dd={} uv_rss_nonzero={} uv_segments={} kernel_copy_calls=0 pixel_reads=0 clean_shutdown=true",
+                            width, height, stride,
+                            y.io, y.pf, y.mm, y.dd, y.rss_nonzero, y.segments,
+                            uv.io, uv.pf, uv.mm, uv.dd, uv.rss_nonzero, uv.segments
+                        );
+                    } else if let Some(summary) = summary {
+                        if sample_once {
+                            info!(
+                                "C5_FRAME_KERNEL_COPY_PASS: display-output plane={}x{} stride={} sample_bytes=3 kernel_copy_calls=2 native_pointer_dereferences=0 pixel_values_logged=0 clean_shutdown=true",
+                                width, height, stride
+                            );
+                        } else if mapping_once {
+                            info!(
+                                "C5_FRAME_MAPPING_PASS: display-output plane={}x{} stride={} y_size={} uv_size={} y_vma_readable=true uv_vma_readable=true descriptor_calls=1 frame_reads=0 clean_shutdown=true",
+                                width, height, stride, summary.y_size, summary.uv_size
+                            );
+                        } else {
+                            info!(
+                                "C5_FRAME_DESCRIPTOR_PASS: display-output plane={}x{} stride={} y_present={} uv_present={} y_size={} uv_size={} descriptor_calls=1 frame_reads=0 clean_shutdown=true",
+                                width, height, stride,
+                                summary.y_present, summary.uv_present,
+                                summary.y_size, summary.uv_size
+                            );
+                        }
+                    } else if process_once {
+                        info!(
+                            "C5_FRAME_PROCESS_PASS: display-output plane={}x{} stride={} process_calls=1 frame_reads=0 clean_shutdown=true",
+                            width, height, stride
+                        );
+                    } else {
+                        info!(
+                            "C5_FRAME_METADATA_PASS: display-output plane={}x{} stride={} clean_shutdown=true frame_reads=0",
+                            width, height, stride
+                        );
+                    }
+                    Ok(())
+                }
+                (Err(error), Ok(())) => Err(error),
+                (Ok(_), Err(error)) => Err(error),
+                (Err(native), Err(cleanup)) => {
+                    Err(native.context(format!("native cleanup also failed: {cleanup:#}")))
+                }
+            }
+        }
+    }
+
     pub fn enable_raw_stats(&mut self) {
         self.raw_stats_enabled = true;
     }
@@ -170,6 +1199,13 @@ impl VtCapture {
                 LIBVTCAPTURE_PATH
             ));
         }
+
+        // The exact C5 vendor ELF exposes a V4L2 MMAP ring, but publishes
+        // the DQBUF index immediately before QBUF. Its current-buffer API
+        // does not give a CPU reader an ownership lease. Do not construct a
+        // long-lived capture object that would form Rust slices over buffers
+        // already returned to the driver. Metadata-only probes are separate.
+        super::histogram::guard_vt_frame_cpu_access()?;
 
         info!(
             "Loading webOS libvtcapture driver from {}...",
@@ -211,7 +1247,7 @@ impl VtCapture {
                 .map_err(|e| anyhow!("Symbol vtCapture_release not found: {}", e))?;
 
             // 1. Create driver instance
-            let driver = fn_create();
+            let driver = frame_create(*fn_create)?;
             if driver.is_null() {
                 return Err(anyhow!("vtCapture_create returned NULL"));
             }
@@ -222,16 +1258,25 @@ impl VtCapture {
             client_id[1] = b'0';
             let caller_id = CString::new("org.webosbrew.lg-hue-sync")?;
 
-            let ret_init = fn_init(
+            let ret_init = match frame_native!(
+                lg_frame_guard_init,
+                "init",
+                *fn_init,
                 driver,
                 caller_id.as_ptr(),
-                client_id.as_mut_ptr() as *mut c_char,
-            );
+                client_id.as_mut_ptr() as *mut c_char
+            ) {
+                Ok(rc) => rc,
+                Err(err) => {
+                    let _ = frame_release(*fn_release, driver);
+                    return Err(err);
+                }
+            };
             if ret_init != 0 {
-                fn_release(driver);
+                let _ = frame_release(*fn_release, driver);
                 if ret_init == 11 {
                     error!(
-                        "[-] vtCapture_init returned error 11 (EAGAIN/EBUSY): /dev/video* hardware scaler is busy! Another capture process (e.g. lg-hue-sync.service, PicCap) is already running. Stop it with: systemctl stop lg-hue-sync"
+                        "[-] vtCapture_init returned native status 11 (Resource Manager acquisition failed in the audited C5 ELF); not necessarily errno EBUSY"
                     );
                 }
                 return Err(NativeCaptureError {
@@ -245,7 +1290,7 @@ impl VtCapture {
             let client_str = match CStr::from_bytes_until_nul(&client_id) {
                 Ok(value) => value.to_string_lossy(),
                 Err(_) => {
-                    fn_release(driver);
+                    let _ = frame_release(*fn_release, driver);
                     return Err(anyhow!("vtCapture_init returned an unterminated client ID"));
                 }
             };
@@ -255,76 +1300,122 @@ impl VtCapture {
                 client_str
             );
 
-            // 3. Preprocess properties (try DISPLAY_OUTPUT=2 first, then SCALER_INPUT=0, then SCALER_OUTPUT=1)
-            // DISPLAY_OUTPUT taps the composited display output and does not lock the raw HDMI input clock during mode switches.
-            let mut preprocessed = false;
-            let mut last_code = -1;
+            // 3. Use one audited capture mode only. Do not switch source
+            // modes after a native refusal (which may be a policy denial).
             let client_ptr = client_id.as_ptr() as *const c_char;
-
-            for dump_mode in [2, 0, 1] {
-                let props = LibVtCaptureProperties {
-                    dump: dump_mode,
-                    loc_x: 0,
-                    loc_y: 0,
-                    reg_w: target_width as i16,
-                    reg_h: target_height as i16,
-                    buf_cnt: 3,
-                    frm: 60,
-                };
-                let ret_pre = fn_preprocess(driver, client_ptr, &props);
-                if ret_pre == 0 {
-                    info!(
-                        "[+] vtCapture_preprocess succeeded (dump_mode: {}, resolution: {}x{})",
-                        dump_mode, target_width, target_height
+            let props = LibVtCaptureProperties {
+                dump: 2, // DISPLAY_OUTPUT; C5 hardware support still unverified.
+                loc_x: 0,
+                loc_y: 0,
+                reg_w: target_width as i16,
+                reg_h: target_height as i16,
+                buf_cnt: 3,
+                frm: 60,
+            };
+            let ret_pre = match frame_native!(
+                lg_frame_guard_preprocess,
+                "preprocess",
+                *fn_preprocess,
+                driver,
+                client_ptr,
+                &props
+            ) {
+                Ok(rc) => rc,
+                Err(err) => {
+                    let _ = frame_native!(
+                        lg_frame_guard_finalize,
+                        "finalize",
+                        *fn_finalize,
+                        driver,
+                        client_ptr
                     );
-                    preprocessed = true;
-                    break;
+                    let _ = frame_release(*fn_release, driver);
+                    return Err(err);
                 }
-                last_code = ret_pre;
+            };
+            if ret_pre != 0 {
+                let _ = frame_native!(
+                    lg_frame_guard_finalize,
+                    "finalize",
+                    *fn_finalize,
+                    driver,
+                    client_ptr
+                );
+                let _ = frame_release(*fn_release, driver);
+                return Err(NativeCaptureError {
+                    backend: "libvtcapture",
+                    operation: "vtCapture_preprocess",
+                    code: ret_pre,
+                }
+                .into());
             }
-
-            if !preprocessed {
-                fn_finalize(driver, client_ptr);
-                fn_release(driver);
-                return Err(anyhow!(
-                    "vtCapture_preprocess failed across all dump modes (last code: {})",
-                    last_code
-                ));
-            }
+            info!("vtCapture_preprocess completed for selected display-output mode");
 
             // 4. Query plane layout and hardware stride
             let mut plane_info = LibVtCapturePlaneInfo::default();
-            let ret_plane = fn_plane_info(driver, client_ptr, &mut plane_info);
+            let ret_plane = match frame_native!(
+                lg_frame_guard_plane_info,
+                "plane-info",
+                *fn_plane_info,
+                driver,
+                client_ptr,
+                &mut plane_info
+            ) {
+                Ok(rc) => rc,
+                Err(err) => {
+                    let _ = frame_native!(
+                        lg_frame_guard_finalize,
+                        "finalize",
+                        *fn_finalize,
+                        driver,
+                        client_ptr
+                    );
+                    let _ = frame_release(*fn_release, driver);
+                    return Err(err);
+                }
+            };
             if ret_plane != 0 {
-                warn!(
-                    "vtCapture_planeInfo returned code {}, using target width as stride",
-                    ret_plane
+                let _ = frame_native!(
+                    lg_frame_guard_finalize,
+                    "finalize",
+                    *fn_finalize,
+                    driver,
+                    client_ptr
                 );
+                let _ = frame_release(*fn_release, driver);
+                return Err(NativeCaptureError {
+                    backend: "libvtcapture",
+                    operation: "vtCapture_planeInfo",
+                    code: ret_plane,
+                }
+                .into());
             }
-
-            // Honor actual hardware-configured plane dimensions if reported, otherwise fallback to target
-            let width = if plane_info.plane_w > 0 {
-                plane_info.plane_w as u32
-            } else {
-                target_width
-            };
-            let height = if plane_info.plane_h > 0 {
-                plane_info.plane_h as u32
-            } else {
-                target_height
-            };
-
-            let stride = if plane_info.stride > 0 && plane_info.stride as u32 >= width {
-                plane_info.stride as u32
-            } else {
-                width
+            let (width, height, stride) = match checked_plane_dimensions(&plane_info) {
+                Ok(layout) => layout,
+                Err(error) => {
+                    let _ = frame_native!(
+                        lg_frame_guard_finalize,
+                        "finalize",
+                        *fn_finalize,
+                        driver,
+                        client_ptr
+                    );
+                    let _ = frame_release(*fn_release, driver);
+                    return Err(error);
+                }
             };
 
             let rgb_size = match nv12_lengths(width, height, stride) {
                 Ok((_, _, size)) => size,
                 Err(error) => {
-                    fn_finalize(driver, client_ptr);
-                    fn_release(driver);
+                    let _ = frame_native!(
+                        lg_frame_guard_finalize,
+                        "finalize",
+                        *fn_finalize,
+                        driver,
+                        client_ptr
+                    );
+                    let _ = frame_release(*fn_release, driver);
                     return Err(error);
                 }
             };
@@ -341,16 +1432,56 @@ impl VtCapture {
             );
 
             // 5. Start streaming capture process
-            let ret_proc = fn_process(driver, client_ptr);
+            let ret_proc = match frame_native!(
+                lg_frame_guard_process,
+                "process",
+                *fn_process,
+                driver,
+                client_ptr
+            ) {
+                Ok(rc) => rc,
+                Err(err) => {
+                    let _ =
+                        frame_native!(lg_frame_guard_stop, "stop", *fn_stop, driver, client_ptr);
+                    let _ = frame_native!(
+                        lg_frame_guard_postprocess,
+                        "postprocess",
+                        *fn_postprocess,
+                        driver,
+                        client_ptr
+                    );
+                    let _ = frame_native!(
+                        lg_frame_guard_finalize,
+                        "finalize",
+                        *fn_finalize,
+                        driver,
+                        client_ptr
+                    );
+                    let _ = frame_release(*fn_release, driver);
+                    return Err(err);
+                }
+            };
             if ret_proc != 0 {
-                fn_stop(driver, client_ptr);
-                fn_postprocess(driver, client_ptr);
-                fn_finalize(driver, client_ptr);
-                fn_release(driver);
+                let _ = frame_native!(lg_frame_guard_stop, "stop", *fn_stop, driver, client_ptr);
+                let _ = frame_native!(
+                    lg_frame_guard_postprocess,
+                    "postprocess",
+                    *fn_postprocess,
+                    driver,
+                    client_ptr
+                );
+                let _ = frame_native!(
+                    lg_frame_guard_finalize,
+                    "finalize",
+                    *fn_finalize,
+                    driver,
+                    client_ptr
+                );
+                let _ = frame_release(*fn_release, driver);
                 return Err(anyhow!("vtCapture_process failed with code {}", ret_proc));
             }
 
-            info!("[+] vtCapture_process stream started successfully");
+            info!("[+] vtCapture_process accepted the existing client ID (stream setup is part of preprocess)");
 
             Ok(Self {
                 driver,
@@ -379,13 +1510,35 @@ impl VtCapture {
         if self.is_stopped || self.driver.is_null() {
             return;
         }
-        unsafe {
-            let client_ptr = self.client_id.as_ptr() as *const c_char;
-            (self.fn_stop)(self.driver, client_ptr);
-            (self.fn_postprocess)(self.driver, client_ptr);
-            (self.fn_finalize)(self.driver, client_ptr);
-            self.is_stopped = true;
+        let client_ptr = self.client_id.as_ptr() as *const c_char;
+        for result in [
+            frame_native!(
+                lg_frame_guard_stop,
+                "stop",
+                self.fn_stop,
+                self.driver,
+                client_ptr
+            ),
+            frame_native!(
+                lg_frame_guard_postprocess,
+                "postprocess",
+                self.fn_postprocess,
+                self.driver,
+                client_ptr
+            ),
+            frame_native!(
+                lg_frame_guard_finalize,
+                "finalize",
+                self.fn_finalize,
+                self.driver,
+                client_ptr
+            ),
+        ] {
+            if let Err(error) = result {
+                warn!("LG capture cleanup: {error:#}");
+            }
         }
+        self.is_stopped = true;
         info!("[-] Released vtCapture hardware scaler channel.");
     }
 }
@@ -506,7 +1659,13 @@ impl ScreenCapture for VtCapture {
             size1: 0,
         };
 
-        let ret = unsafe { (self.fn_current_buff_info)(self.driver, &mut buf_info) };
+        let ret = frame_native!(
+            lg_frame_guard_current_buffer,
+            "current-buffer",
+            self.fn_current_buff_info,
+            self.driver,
+            &mut buf_info
+        )?;
         if ret != 0 || buf_info.start_addr0.is_null() {
             return Err(CaptureError::Unavailable(NativeCaptureError {
                 backend: "libvtcapture",
@@ -600,17 +1759,33 @@ impl ScreenCapture for VtCapture {
 
 impl Drop for VtCapture {
     fn drop(&mut self) {
-        unsafe {
-            if !self.driver.is_null() {
-                let client_ptr = self.client_id.as_ptr() as *const c_char;
-                if !self.is_stopped {
-                    (self.fn_stop)(self.driver, client_ptr);
-                    (self.fn_postprocess)(self.driver, client_ptr);
-                    (self.fn_finalize)(self.driver, client_ptr);
-                }
-                (self.fn_release)(self.driver);
-                self.driver = std::ptr::null_mut();
+        if !self.driver.is_null() {
+            let client_ptr = self.client_id.as_ptr() as *const c_char;
+            if !self.is_stopped {
+                let _ = frame_native!(
+                    lg_frame_guard_stop,
+                    "stop",
+                    self.fn_stop,
+                    self.driver,
+                    client_ptr
+                );
+                let _ = frame_native!(
+                    lg_frame_guard_postprocess,
+                    "postprocess",
+                    self.fn_postprocess,
+                    self.driver,
+                    client_ptr
+                );
+                let _ = frame_native!(
+                    lg_frame_guard_finalize,
+                    "finalize",
+                    self.fn_finalize,
+                    self.driver,
+                    client_ptr
+                );
             }
+            let _ = frame_release(self.fn_release, self.driver);
+            self.driver = std::ptr::null_mut();
         }
     }
 }
@@ -620,11 +1795,351 @@ mod tests {
     use super::*;
 
     #[test]
+    fn io_pfn_buffer_copy_is_rejected_before_syscall() {
+        let normal = VmaAttributes::default();
+        assert!(reject_special_vmas_for_kernel_copy(normal, normal).is_ok());
+        let c5 = VmaAttributes {
+            io: true,
+            pf: true,
+            dd: true,
+            segments: 1,
+            ..VmaAttributes::default()
+        };
+        assert!(reject_special_vmas_for_kernel_copy(c5, normal).is_err());
+        assert!(reject_special_vmas_for_kernel_copy(normal, c5).is_err());
+        assert!(reject_special_vmas_for_kernel_copy(c5, c5).is_err());
+        let mixed = VmaAttributes {
+            mm: true,
+            ..VmaAttributes::default()
+        };
+        assert!(reject_special_vmas_for_kernel_copy(normal, mixed).is_err());
+    }
+
+    #[test]
+    fn vma_flag_probe_detects_pfn_and_io_without_memory_access() {
+        let smaps = concat!(
+            "00001000-00002000 rw-s 00000000 00:00 0 /dev/example\n",
+            "Rss:                   0 kB\n",
+            "VmFlags: rd wr mr mw pf io dd\n",
+            "00002000-00003000 r--s 00000000 00:00 0 /dev/example\n",
+            "Rss:                   4 kB\n",
+            "VmFlags: rd mr mm\n",
+            "00004000-00005000 rw-p 00000000 00:00 0\n",
+            "Rss:                   8 kB\n",
+            "VmFlags: rd wr mr mw\n",
+        );
+        let regions = parse_smaps_spans(smaps).unwrap();
+        let y = summarize_vma_range(0x1800, 0x1000, &regions).unwrap();
+        assert!(y.io && y.pf && y.mm && y.dd);
+        assert!(y.rss_nonzero);
+        assert_eq!(y.segments, 2);
+        let uv = summarize_vma_range(0x4000, 0x800, &regions).unwrap();
+        assert!(!uv.io && !uv.pf && !uv.mm);
+        assert!(uv.rss_nonzero && uv.segments == 1);
+        assert!(summarize_vma_range(0x2800, 0x1800, &regions).is_err());
+        assert!(summarize_vma_range(usize::MAX, 2, &regions).is_err());
+        let missing_flags =
+            parse_smaps_spans("00001000-00002000 r--p 00000000 00:00 0\nRss: 0 kB\n").unwrap();
+        assert!(summarize_vma_range(0x1000, 1, &missing_flags).is_err());
+    }
+
+    #[test]
+    fn bounded_three_byte_offsets_are_centered_and_reject_short_planes() {
+        let summary = DescriptorSummary {
+            y_present: true,
+            uv_present: true,
+            y_size: 57600,
+            uv_size: 28800,
+        };
+        assert_eq!(
+            checked_central_offsets((320, 180, 320), summary).unwrap(),
+            (28960, 14560)
+        );
+        assert!(checked_central_offsets((320, 180, 321), summary).is_err());
+        assert!(checked_central_offsets((640, 360, 640), summary).is_err());
+        assert!(checked_central_offsets(
+            (320, 180, 320),
+            DescriptorSummary {
+                y_size: 28960,
+                ..summary
+            }
+        )
+        .is_err());
+        assert!(checked_central_offsets(
+            (320, 180, 320),
+            DescriptorSummary {
+                uv_size: 14561,
+                ..summary
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn kernel_copy_refuses_invalid_requests_before_any_syscall() {
+        let mut one = [0u8; 1];
+        assert!(copy_self_via_kernel(0, &mut one).is_err());
+        assert!(copy_self_via_kernel(usize::MAX, &mut one).is_err());
+        let mut three = [0u8; 3];
+        assert!(copy_self_via_kernel(1, &mut three).is_err());
+        assert!(copy_self_via_kernel(1, &mut []).is_err());
+    }
+
+    #[test]
+    fn readable_maps_cover_only_contiguous_readable_intervals() {
+        let maps = "00001000-00002000 rw-p 00000000 00:00 0\n00002000-00003000 r--p 00000000 00:00 0\n00003000-00004000 -w-p 00000000 00:00 0\n00005000-00006000 r--p 00000000 00:00 0\n";
+        let spans = parse_readable_spans(maps).unwrap();
+        assert!(span_is_readable(0x1800, 0x1000, &spans));
+        assert!(!span_is_readable(0x2800, 0x1000, &spans));
+        assert!(!span_is_readable(0x3800, 0x100, &spans));
+        assert!(!span_is_readable(0x2800, 0x2800, &spans));
+        assert!(span_is_readable(0x5000, 0x1000, &spans));
+        assert!(!span_is_readable(0x5000, 0x1001, &spans));
+        assert!(!span_is_readable(usize::MAX - 2, 10, &spans));
+        assert!(parse_readable_spans("not-a-mapping rw-p").is_err());
+    }
+
+    #[test]
+    fn mapping_probe_checks_full_ranges_and_rejects_overlap_without_reading() {
+        let layout = DescriptorSummary {
+            y_present: true,
+            uv_present: true,
+            y_size: 0x1000,
+            uv_size: 0x800,
+        };
+        let maps =
+            "00001000-00003000 rw-p 00000000 00:00 0\n00004000-00005000 r--p 00000000 00:00 0\n";
+        // Deliberately fake pointer values: no actual allocation exists.
+        let mut descriptor = LibVtCaptureBufferInfo {
+            start_addr0: 0x1800usize as *mut u8,
+            start_addr1: 0x4000usize as *mut u8,
+            size0: 0x1000,
+            size1: 0x800,
+        };
+        check_descriptor_readable_mappings(&descriptor, layout, maps).unwrap();
+        // Adjacent planes are valid; overlapping planes are not.
+        descriptor.start_addr1 = 0x2800usize as *mut u8;
+        check_descriptor_readable_mappings(&descriptor, layout, maps).unwrap();
+        descriptor.start_addr1 = 0x2700usize as *mut u8;
+        assert!(check_descriptor_readable_mappings(&descriptor, layout, maps).is_err());
+        descriptor.start_addr1 = 0x5000usize as *mut u8;
+        assert!(check_descriptor_readable_mappings(&descriptor, layout, maps).is_err());
+    }
+
+    #[test]
+    fn buffer_descriptor_is_checked_as_opaque_metadata_only() {
+        // Deliberately invalid non-null pointers. The validator must not
+        // dereference, copy or create slices from either address.
+        let descriptor = LibVtCaptureBufferInfo {
+            start_addr0: std::ptr::dangling_mut::<u8>(),
+            start_addr1: std::ptr::dangling_mut::<u8>(),
+            size0: 320 * 180,
+            size1: 320 * 90,
+        };
+        let valid = validate_buffer_descriptor(&descriptor, (320, 180, 320)).unwrap();
+        assert!(valid.y_present && valid.uv_present);
+        assert_eq!(valid.y_size, 57600);
+        assert_eq!(valid.uv_size, 28800);
+
+        let missing_uv = LibVtCaptureBufferInfo {
+            start_addr1: std::ptr::null_mut(),
+            ..descriptor
+        };
+        assert!(validate_buffer_descriptor(&missing_uv, (320, 180, 320)).is_err());
+
+        let undersized = LibVtCaptureBufferInfo {
+            size0: 57599,
+            ..descriptor
+        };
+        assert!(validate_buffer_descriptor(&undersized, (320, 180, 320)).is_err());
+
+        let negative = LibVtCaptureBufferInfo {
+            size1: -1,
+            ..descriptor
+        };
+        assert!(validate_buffer_descriptor(&negative, (320, 180, 320)).is_err());
+
+        let huge = LibVtCaptureBufferInfo {
+            size0: 17 * 1024 * 1024,
+            ..descriptor
+        };
+        assert!(validate_buffer_descriptor(&huge, (320, 180, 320)).is_err());
+    }
+
+    #[test]
+    fn process_probe_cleanup_stops_before_postprocess_finalize_release() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn stop(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 0);
+            0
+        }
+        unsafe extern "C" fn post(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 1);
+            0
+        }
+        unsafe extern "C" fn finalise(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 2);
+            0
+        }
+        unsafe extern "C" fn release(_: *mut c_void) {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 3);
+        }
+
+        CALLS.store(0, Ordering::SeqCst);
+        let mut session = C5MetadataSession {
+            driver: std::ptr::dangling_mut::<c_void>(),
+            client_id: [0; 128],
+            initialized: true,
+            preprocess_attempted: true,
+            process_attempted: true,
+            released: false,
+            stop,
+            postprocess: post,
+            finalize: finalise,
+            release,
+        };
+        session.cleanup().unwrap();
+        session.cleanup().unwrap();
+        drop(session);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn process_probe_attempts_full_cleanup_on_stop_refusal() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn stop(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 0);
+            17
+        }
+        unsafe extern "C" fn post(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 1);
+            0
+        }
+        unsafe extern "C" fn finalise(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 2);
+            0
+        }
+        unsafe extern "C" fn release(_: *mut c_void) {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 3);
+        }
+
+        CALLS.store(0, Ordering::SeqCst);
+        let mut session = C5MetadataSession {
+            driver: std::ptr::dangling_mut::<c_void>(),
+            client_id: [0; 128],
+            initialized: true,
+            preprocess_attempted: true,
+            process_attempted: true,
+            released: false,
+            stop,
+            postprocess: post,
+            finalize: finalise,
+            release,
+        };
+        let err = session.cleanup().unwrap_err().to_string();
+        assert!(err.contains("stop returned 17"));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 4);
+        assert!(session.released);
+    }
+
+    #[test]
+    fn metadata_probe_cleanup_runs_once_in_correct_order_without_a_device() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn fake_stop(_: *mut c_void, _: *const c_char) -> c_int {
+            panic!("metadata-only probe must not call stop")
+        }
+        unsafe extern "C" fn fake_post(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 0);
+            0
+        }
+        unsafe extern "C" fn fake_final(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 1);
+            0
+        }
+        unsafe extern "C" fn fake_release(_: *mut c_void) {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 2);
+        }
+
+        CALLS.store(0, Ordering::SeqCst);
+        let mut session = C5MetadataSession {
+            driver: std::ptr::dangling_mut::<c_void>(),
+            client_id: [0; 128],
+            initialized: true,
+            preprocess_attempted: true,
+            process_attempted: false,
+            released: false,
+            stop: fake_stop,
+            postprocess: fake_post,
+            finalize: fake_final,
+            release: fake_release,
+        };
+        session.cleanup().unwrap();
+        session.cleanup().unwrap();
+        drop(session);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn metadata_probe_release_after_init_refusal_skips_postprocess_and_finalize() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static RELEASED: AtomicBool = AtomicBool::new(false);
+        unsafe extern "C" fn unexpected(_: *mut c_void, _: *const c_char) -> c_int {
+            panic!("not initialized, should not clean up as initialized");
+        }
+        unsafe extern "C" fn fake_release(_: *mut c_void) {
+            RELEASED.store(true, Ordering::SeqCst);
+        }
+        RELEASED.store(false, Ordering::SeqCst);
+        let mut session = C5MetadataSession {
+            driver: std::ptr::dangling_mut::<c_void>(),
+            client_id: [0; 128],
+            initialized: false,
+            preprocess_attempted: false,
+            process_attempted: false,
+            released: false,
+            stop: unexpected,
+            postprocess: unexpected,
+            finalize: unexpected,
+            release: fake_release,
+        };
+        session.cleanup().unwrap();
+        assert!(RELEASED.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn test_vtcapture_struct_sizes() {
         assert_eq!(std::mem::size_of::<LibVtCaptureProperties>(), 20);
         assert_eq!(std::mem::size_of::<LibVtCapturePlaneInfo>(), 20);
         #[cfg(target_pointer_width = "32")]
         assert_eq!(std::mem::size_of::<LibVtCaptureBufferInfo>(), 16);
+    }
+
+    #[test]
+    fn c5_plane_validation_rejects_oversized_unaligned_and_missing_geometry() {
+        let mut plane = LibVtCapturePlaneInfo {
+            stride: 320,
+            plane_w: 320,
+            plane_h: 180,
+            ..Default::default()
+        };
+        assert_eq!(checked_plane_dimensions(&plane).unwrap(), (320, 180, 320));
+        plane.stride = 200;
+        assert!(checked_plane_dimensions(&plane).is_err());
+        plane.stride = 8200;
+        assert!(checked_plane_dimensions(&plane).is_err());
+        plane.stride = 320;
+        plane.plane_h = 0;
+        assert!(checked_plane_dimensions(&plane).is_err());
+        plane.plane_h = 181;
+        assert!(checked_plane_dimensions(&plane).is_err());
+        plane.plane_h = 180;
+        plane.plane_w = 319;
+        assert!(checked_plane_dimensions(&plane).is_err());
+        plane.plane_w = 320;
+        assert!(checked_plane_dimensions(&plane).is_ok());
     }
 
     #[test]

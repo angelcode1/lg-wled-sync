@@ -3,7 +3,9 @@ mod color;
 mod config;
 mod hue;
 mod local_http;
+mod ls2_probe;
 mod nanoleaf;
+mod output;
 mod runtime;
 mod setup;
 mod tv_power;
@@ -21,14 +23,21 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
+use capture::drm_routing::{DrmCaptureRouter, HistogramHealth, PlaybackClass, Source};
+use capture::histogram::HistogramCapture;
 use capture::{
     create_capture, detect_source_fps, CaptureRecovery, MockCapture, RecoveryAction, ScreenCapture,
     VtCapture,
 };
+use color::pipeline::{ColorField, ColorPipeline};
 use color::{RgbColor, ZoneSampler};
 use config::{Config, ConfigError};
 use hue::{sync_entertainment_areas, HueDtlsClient, HueStreamPacketBuilder};
 use nanoleaf::{NanoleafPerimeterSampler, NanoleafUdpStreamer};
+use output::gate::OutputGate;
+use output::perimeter::PerimeterSampler;
+use output::wled::WledUdpStreamer;
+use output::{ColorSource, HueOutput, LightFrame, LightOutput};
 use runtime::{PendingCommands, PipelineState, RetryState};
 use setup::{run_pair, run_pair_nanoleaf, run_sync_hue};
 use web::{start_web_server, CalibrationPattern, LiveSettings, SharedState};
@@ -66,6 +75,87 @@ enum Commands {
         /// Report central raw NV12 statistics without saving frame pixels or sending light output
         #[arg(long)]
         raw_nv12_stats: bool,
+    },
+    /// Explicit, bounded native LG histogram probe; no config or light output
+    TestHistogram {
+        /// Confirm that this test temporarily initializes the LG VT histogram device
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+        /// Number of samples (2–20)
+        #[arg(long, default_value_t = 8)]
+        samples: u8,
+        /// Delay between samples in milliseconds (100–2000)
+        #[arg(long, default_value_t = 600)]
+        interval_ms: u64,
+    },
+    /// One native frame initialization/cleanup check (no streaming, no pixel reads)
+    TestFrameInit {
+        /// Acknowledge temporary LG native VT/Resource Manager acquisition
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+    },
+    /// One fixed display-output preprocess + plane metadata check; no frame reads
+    TestFrameMetadata {
+        /// Acknowledge that preprocess may activate the hardware scaler briefly
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+    },
+    /// One native process/stop cycle, without requesting or reading frame buffers
+    TestFrameProcess {
+        /// Acknowledge temporary activation of native capture processing
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+    },
+    /// One native buffer descriptor request, without dereferencing pixels
+    TestFrameDescriptor {
+        /// Acknowledge one short-lived native buffer-descriptor lookup
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+    },
+    /// Validate native descriptor ranges against /proc/self/maps, without pixel reads
+    TestFrameMapping {
+        /// Acknowledge one native frame-descriptor and VMA inspection
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+    },
+    /// Read just three bytes through the Linux kernel; never dereference VT pointers
+    TestFrameKernelCopy {
+        /// Acknowledge one short-lived native pixel-buffer copy of exactly three bytes
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+    },
+    /// Inspect PFN/IO flags for live VT descriptor VMAs without reading pixels
+    TestFrameVmaFlags {
+        /// Acknowledge one native metadata-only VMA flag inspection
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+    },
+    /// Read-only V4L2 VIDIOC_QUERYCAP for the verified C5 /dev/video60 node
+    TestV4l2Querycap {
+        /// Acknowledge one device open and one metadata-only VIDIOC_QUERYCAP
+        #[arg(long)]
+        acknowledge_device_open: bool,
+    },
+    /// Enumerate capture formats and read current metadata; never allocate a buffer
+    TestV4l2Formats {
+        /// Acknowledge one read-only V4L2 descriptor and metadata ioctls
+        #[arg(long)]
+        acknowledge_device_open: bool,
+    },
+    /// Query only the current multi-planar format, without ENUM_FMT or capture
+    TestV4l2CurrentFormat {
+        /// Acknowledge one device open and read-only QUERYCAP + G_FMT
+        #[arg(long)]
+        acknowledge_device_open: bool,
+    },
+    /// Register/unregister a temporary private LS2 name without loading the VT capture driver
+    TestLs2Registration {
+        /// Explicitly acknowledge an active Luna bus registration attempt
+        #[arg(long)]
+        acknowledge_luna_registration: bool,
+        /// Probe native VT's capture-client LSRegister name instead of Resource Manager
+        #[arg(long)]
+        capture_client: bool,
     },
     /// Discover and pair with a Philips Hue Bridge via pushlink button
     Pair {
@@ -107,6 +197,45 @@ async fn main() -> Result<()> {
             config,
             raw_nv12_stats,
         } => run_test_capture(config, raw_nv12_stats).await,
+        Commands::TestHistogram {
+            acknowledge_native_capture,
+            samples,
+            interval_ms,
+        } => run_test_histogram(acknowledge_native_capture, samples, interval_ms).await,
+        Commands::TestFrameInit {
+            acknowledge_native_capture,
+        } => run_test_frame_init(acknowledge_native_capture).await,
+        Commands::TestFrameMetadata {
+            acknowledge_native_capture,
+        } => run_test_frame_metadata(acknowledge_native_capture).await,
+        Commands::TestFrameProcess {
+            acknowledge_native_capture,
+        } => run_test_frame_process(acknowledge_native_capture).await,
+        Commands::TestFrameDescriptor {
+            acknowledge_native_capture,
+        } => run_test_frame_descriptor(acknowledge_native_capture).await,
+        Commands::TestFrameMapping {
+            acknowledge_native_capture,
+        } => run_test_frame_mapping(acknowledge_native_capture).await,
+        Commands::TestFrameKernelCopy {
+            acknowledge_native_capture,
+        } => run_test_frame_kernel_copy(acknowledge_native_capture).await,
+        Commands::TestFrameVmaFlags {
+            acknowledge_native_capture,
+        } => run_test_frame_vma_flags(acknowledge_native_capture).await,
+        Commands::TestV4l2Querycap {
+            acknowledge_device_open,
+        } => run_test_v4l2_querycap(acknowledge_device_open),
+        Commands::TestV4l2Formats {
+            acknowledge_device_open,
+        } => run_test_v4l2_formats(acknowledge_device_open),
+        Commands::TestV4l2CurrentFormat {
+            acknowledge_device_open,
+        } => run_test_v4l2_current_format(acknowledge_device_open),
+        Commands::TestLs2Registration {
+            acknowledge_luna_registration,
+            capture_client,
+        } => ls2_probe::run(acknowledge_luna_registration, capture_client),
         Commands::Pair { bridge, output } => run_pair(bridge, output).await,
         Commands::SyncHue { config, area } => run_sync_hue(config, area).await,
         Commands::PairNanoleaf { ip, config } => run_pair_nanoleaf(ip, config).await,
@@ -219,40 +348,200 @@ fn calibration_color(pattern: CalibrationPattern, (x, y): (f32, f32)) -> RgbColo
     }
 }
 
-fn frame_average(data: &[u8], width: u32, height: u32, is_bgra: bool) -> RgbColor {
-    let mut total = [0u64; 3];
-    let mut count = 0u64;
-    for y in (0..height as usize).step_by(8) {
-        for x in (0..width as usize).step_by(8) {
-            let offset = (y * width as usize + x) * 4;
-            if offset + 2 >= data.len() {
-                continue;
-            }
-            let (r, g, b) = if is_bgra {
-                (data[offset + 2], data[offset + 1], data[offset])
-            } else {
-                (data[offset], data[offset + 1], data[offset + 2])
-            };
-            total[0] += r as u64;
-            total[1] += g as u64;
-            total[2] += b as u64;
-            count += 1;
-        }
-    }
-    RgbColor::new(
-        total[0].checked_div(count).unwrap_or(0) as u8,
-        total[1].checked_div(count).unwrap_or(0) as u8,
-        total[2].checked_div(count).unwrap_or(0) as u8,
-    )
+/// A single published colour field is faned out to any enabled vendor.
+/// Every adapter owns geometry and network protocol; this layer owns status,
+/// throttling and reconnects, never reprocessing captured RGB values.
+struct OutputFanout<'a> {
+    field: &'a ColorField,
+    config: &'a Config,
+    settings: &'a LiveSettings,
+    shared: &'a SharedState,
+    wled: &'a mut [(WledUdpStreamer, PerimeterSampler, f32)],
+    hue_transport: &'a mut Option<HueDtlsClient>,
+    hue_packets: &'a mut Option<HueStreamPacketBuilder>,
+    nanoleaf_transport: &'a mut Option<NanoleafUdpStreamer>,
+    nanoleaf_layout: &'a Option<NanoleafPerimeterSampler>,
+    hue_enabled: bool,
+    nanoleaf_enabled: bool,
+    hue_retry: &'a mut RetryState,
+    nanoleaf_retry: &'a mut RetryState,
+    gate: &'a mut OutputGate,
 }
 
-/// Suppresses duplicate transport frames while retaining a 2 Hz keepalive.
-fn colors_changed(previous: &[RgbColor], current: &[RgbColor]) -> bool {
-    previous.len() != current.len()
-        || previous
-            .iter()
-            .zip(current)
-            .any(|(left, right)| left.delta(*right) >= 0.005)
+impl OutputFanout<'_> {
+    fn publish(&mut self) -> bool {
+        let mut any_sent = false;
+        let calibration = calibration_pattern(self.shared);
+        let source = self.field.source();
+        let adaptive = self.config.adaptive_throttling;
+        if self.field.scene_cut {
+            self.gate.clear();
+        }
+
+        if self.hue_enabled {
+            let ids: Vec<u8> = self
+                .config
+                .zones
+                .iter()
+                .map(|zone| zone.channel_id)
+                .collect();
+            let colors = if let Some(pattern) = calibration {
+                calibration_zone_colors(pattern, &self.config.zones)
+                    .into_iter()
+                    .map(|(_, color)| color)
+                    .collect::<Vec<_>>()
+            } else {
+                HueOutput::map_field(
+                    self.field,
+                    &self.config.zones,
+                    self.settings.brightness_multiplier * self.settings.hue_output_brightness,
+                )
+            };
+            *self.shared.live_hue_colors.write().unwrap() =
+                ids.iter().copied().zip(colors.iter().copied()).collect();
+            if self.gate.should_send("hue", &colors, adaptive) {
+                if let (Some(dtls), Some(packets)) =
+                    (self.hue_transport.as_mut(), self.hue_packets.as_mut())
+                {
+                    let mut adapter = HueOutput {
+                        transport: dtls,
+                        packets,
+                        channel_ids: &ids,
+                        use_xy: calibration.is_none() && self.settings.use_xy_gamut,
+                    };
+                    match adapter.send(&LightFrame {
+                        colors: &colors,
+                        source,
+                    }) {
+                        Ok(()) => {
+                            self.gate.record("hue", &colors);
+                            self.hue_retry.success();
+                            self.shared.hue_connected.store(true, Ordering::Relaxed);
+                            any_sent = true;
+                        }
+                        Err(error) => {
+                            self.shared.hue_connected.store(false, Ordering::Relaxed);
+                            warn!("{} output error: {error}", adapter.kind());
+                            if self.hue_retry.ready() {
+                                match reconnect_hue(self.config) {
+                                    Ok(new_dtls) => {
+                                        *dtls = new_dtls;
+                                        self.hue_retry.success();
+                                        self.shared.hue_connected.store(true, Ordering::Relaxed);
+                                    }
+                                    Err(err) => {
+                                        self.hue_retry.failure();
+                                        warn!("Hue reconnect failed: {err}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if self.nanoleaf_enabled {
+            if let Some(layout) = self.nanoleaf_layout.as_ref() {
+                let positions = layout.screen_positions();
+                let colors = if let Some(pattern) = calibration {
+                    calibration_perimeter_colors(pattern, positions.len())
+                } else {
+                    NanoleafUdpStreamer::map_field(
+                        self.field,
+                        &positions,
+                        self.settings.brightness_multiplier
+                            * self.settings.nanoleaf_output_brightness,
+                    )
+                };
+                *self.shared.live_nanoleaf_colors.write().unwrap() = colors.clone();
+                if self.gate.should_send("nanoleaf", &colors, adaptive) {
+                    if let Some(transport) = self.nanoleaf_transport.as_mut() {
+                        match transport.send(&LightFrame {
+                            colors: &colors,
+                            source,
+                        }) {
+                            Ok(()) => {
+                                self.gate.record("nanoleaf", &colors);
+                                self.nanoleaf_retry.success();
+                                self.shared
+                                    .nanoleaf_connected
+                                    .store(true, Ordering::Relaxed);
+                                any_sent = true;
+                            }
+                            Err(error) => {
+                                self.shared
+                                    .nanoleaf_connected
+                                    .store(false, Ordering::Relaxed);
+                                warn!("{} output error: {error}", transport.kind());
+                                if self.nanoleaf_retry.ready() {
+                                    if let Some(ncfg) = self.config.nanoleaf.as_ref() {
+                                        match nanoleaf::enable_external_control(
+                                            &ncfg.ip,
+                                            &ncfg.auth_token,
+                                        )
+                                        .and_then(|port| {
+                                            NanoleafUdpStreamer::new(
+                                                &ncfg.ip,
+                                                port,
+                                                layout.panel_ids(),
+                                            )
+                                        }) {
+                                            Ok(new_transport) => {
+                                                *transport = new_transport;
+                                                self.nanoleaf_retry.success();
+                                            }
+                                            Err(err) => {
+                                                self.nanoleaf_retry.failure();
+                                                warn!("Nanoleaf reconnect failed: {err}");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if self.config.wled_sync_enabled {
+            let mut all_wled_ok = true;
+            for (index, (transport, sampler, trim)) in self.wled.iter_mut().enumerate() {
+                let colors = if let Some(pattern) = calibration {
+                    calibration_perimeter_colors(pattern, transport.led_count())
+                } else {
+                    WledUdpStreamer::map_field(
+                        self.field,
+                        sampler.screen_positions(),
+                        self.settings.brightness_multiplier * *trim,
+                    )
+                };
+                let key = format!("wled-{index}");
+                if !self.gate.should_send(&key, &colors, adaptive) {
+                    continue;
+                }
+                match transport.send(&LightFrame {
+                    colors: &colors,
+                    source,
+                }) {
+                    Ok(()) => {
+                        self.gate.record(&key, &colors);
+                        any_sent = true;
+                    }
+                    Err(error) => {
+                        all_wled_ok = false;
+                        warn!("{} output {index} failed: {error}", transport.kind());
+                    }
+                }
+            }
+            // A successful UDP syscall is not a physical-controller ACK.
+            self.shared
+                .wled_last_send_ok
+                .store(all_wled_ok, Ordering::Relaxed);
+        }
+        any_sent
+    }
 }
 
 async fn run_daemon(config_path: PathBuf) -> Result<()> {
@@ -397,8 +686,13 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut hue_sync_enabled = config.hue_sync_enabled;
     let mut nanoleaf_sync_enabled = config.nanoleaf_sync_enabled;
     let mut hue_dtls = if hue_active && hue_sync_enabled && pipeline_should_run {
-        let client = reconnect_hue(&config)?;
-        Some(client)
+        match reconnect_hue(&config) {
+            Ok(client) => Some(client),
+            Err(error) => {
+                warn!("Hue unavailable at start; keeping other outputs running: {error}");
+                None
+            }
+        }
     } else {
         None
     };
@@ -443,14 +737,21 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             n_cfg.alignment,
         );
         let streamer = if nanoleaf_sync_enabled && pipeline_should_run {
-            let port = nanoleaf::enable_external_control(&n_cfg.ip, &n_cfg.auth_token)?;
-            let streamer = NanoleafUdpStreamer::new(&n_cfg.ip, port, sampler.panel_ids())?;
-            info!(
-                "[+] Nanoleaf 4D streaming ready: {} perimeter segments on UDP port {}",
-                streamer.panel_count(),
-                port
-            );
-            Some(streamer)
+            match nanoleaf::enable_external_control(&n_cfg.ip, &n_cfg.auth_token)
+                .and_then(|port| NanoleafUdpStreamer::new(&n_cfg.ip, port, sampler.panel_ids()))
+            {
+                Ok(streamer) => {
+                    info!(
+                        "Nanoleaf 4D streaming ready: {} segments",
+                        streamer.panel_count()
+                    );
+                    Some(streamer)
+                }
+                Err(error) => {
+                    warn!("Nanoleaf unavailable at start; keeping other outputs running: {error}");
+                    None
+                }
+            }
         } else {
             None
         };
@@ -467,8 +768,75 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         sampler.set_max_color_step(config.max_color_step);
     }
 
+    // Native WLED adapter: config owns physical LED geometry and output
+    // transport. Hue/Nanoleaf credentials are entirely optional.
+    let mut wled_outputs = Vec::new();
+    if config.wled_sync_enabled {
+        for device in config.wled_devices.iter().filter(|d| d.enabled) {
+            match WledUdpStreamer::new(&device.ip, device.udp_port, device.led_count) {
+                Ok(transport) => {
+                    let sampler = PerimeterSampler::new(
+                        device.led_count,
+                        device.start_corner,
+                        device.reverse_direction,
+                        device.perimeter_offset,
+                        config.saturation_boost,
+                        config.noise_gate_threshold,
+                        config.gamma,
+                        config.strict_blackout,
+                    );
+                    info!(
+                        "WLED output configured: {} LEDs -> {}",
+                        device.led_count,
+                        transport.target()
+                    );
+                    wled_outputs.push((transport, sampler, device.brightness_trim));
+                }
+                Err(e) => warn!("WLED output unavailable: {e}"),
+            }
+        }
+    }
+
     // 3. Initialize capture
-    let mut capture = create_capture(config.capture_width, config.capture_height);
+    // Start without native capture. The media router must grant a stable Clear state first.
+    let mut capture: Box<dyn ScreenCapture> = Box::new(MockCapture::new(
+        config.capture_width,
+        config.capture_height,
+    ));
+    let mut color_pipeline = ColorPipeline::new(
+        config.saturation_boost,
+        config.noise_gate_threshold,
+        config.letterbox_detection,
+    );
+    color_pipeline.tune(
+        config.saturation_boost,
+        config.noise_gate_threshold,
+        config.gamma,
+        config.peak_weight,
+        config.rise_smoothing_factor,
+        config.fall_smoothing_factor,
+        config.strict_blackout,
+        config.max_color_step,
+        config.hdr_tone_mapping,
+        config.letterbox_detection,
+        config.spatial_blend,
+    );
+    let mut drm_router = DrmCaptureRouter::default();
+    drm_router.set_mode(config.capture_mode);
+    let mut histogram_capture: Option<HistogramCapture> = None;
+    let mut using_histogram = false;
+    let mut media_class = PlaybackClass::Unknown;
+    // Long-lived Luna requests must not stall 30–60 FPS LED output. Poll
+    // results in background tasks, without detaching uncontrolled processes.
+    let mut media_query: Option<tokio::task::JoinHandle<PlaybackClass>> = None;
+    let mut model_query: Option<tokio::task::JoinHandle<Option<String>>> = None;
+    let mut tv_model: Option<String> = None;
+    let mut last_model_check = tokio::time::Instant::now() - Duration::from_secs(31);
+    let mut last_model_warning = tokio::time::Instant::now() - Duration::from_secs(61);
+    let mut last_media_check = tokio::time::Instant::now() - Duration::from_secs(2);
+    let mut last_histogram_attempt = tokio::time::Instant::now() - Duration::from_secs(10);
+    let mut last_histogram_valid: Option<std::time::Instant> = None;
+    let mut histogram_black_sent = false;
 
     // Determine target framerate (supports auto-matching source refresh rate 23.976..60.0 Hz)
     let detected_fps = if config.fps == 0 {
@@ -557,6 +925,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     shared_state.set_fps(target_fps as f32);
 
     shared_state
+        .wled_count
+        .store(wled_outputs.len() as u32, Ordering::Relaxed);
+    shared_state
         .hue_connected
         .store(hue_dtls.is_some(), Ordering::Relaxed);
     shared_state
@@ -582,15 +953,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
     };
 
-    let mut current_hue_brightness = config.brightness_multiplier * config.hue_output_brightness;
-    let mut current_use_xy = config.use_xy_gamut;
     let mut auto_tv_power = config.auto_tv_power;
 
-    let mut last_channels: Vec<(u8, (u16, u16, u16))> = Vec::new();
-    let mut last_nanoleaf_colors: Vec<RgbColor> = Vec::new();
-    let mut static_frame_count: u32 = 0;
-    let mut last_heartbeat = tokio::time::Instant::now();
-    let mut last_nanoleaf_heartbeat = tokio::time::Instant::now();
+    let mut output_gate = OutputGate::default();
     let mut light_update_count = 0u32;
     let mut light_update_window = tokio::time::Instant::now();
     let mut last_status_check = tokio::time::Instant::now();
@@ -604,8 +969,6 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut last_tv_power_warning = tokio::time::Instant::now() - Duration::from_secs(30);
     let mut hue_retry = RetryState::new();
     let mut nanoleaf_retry = RetryState::new();
-    let mut nanoleaf_only_frame_count = 0u64;
-    let mut nanoleaf_only_global = RgbColor::new(0, 0, 0);
     let mut pending_commands = PendingCommands {
         desired_running: (!pipeline_should_run).then_some(false),
         ..PendingCommands::default()
@@ -656,9 +1019,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
         // 1. Check for web UI or external stop requests
         let web_stop_requested = pending_commands.take_stop_if_running(pipeline_state);
-        let mut external_stop = false;
-
-        // Periodically verify if the user stopped sync from the official Hue mobile app (every 5s)
+        // Hue external control affects only Hue, never WLED or Nanoleaf.
+        // Periodically verify the Hue Entertainment Area ownership (every 5s)
         if last_status_check.elapsed() >= Duration::from_secs(5) {
             last_status_check = tokio::time::Instant::now();
             if hue_active && hue_sync_enabled && hue_dtls.is_some() {
@@ -670,26 +1032,52 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         config.hue_bridge_certificate_sha256.as_deref(),
                     ) {
                         if !state.active {
-                            external_stop = true;
+                            hue_sync_enabled = false;
+                            hue_dtls = None;
+                            shared_state.hue_connected.store(false, Ordering::Relaxed);
+                            info!("Hue external stream stopped; WLED/Nanoleaf remain active");
                         }
-                        if let Some(ref mut s) = hue_sampler {
-                            s.set_smoothing_factor(state.smoothing_factor);
-                        }
-                        if let Some(ref mut ns) = nanoleaf_sampler {
-                            ns.set_smoothing_factor(state.smoothing_factor);
-                        }
+                        // The Hue app's smoothing preference is device-specific.
+                        // Do not apply it as a second processing pass to all vendors.
                     }
                 }
             }
         }
 
-        if web_stop_requested || external_stop || pipeline_state == PipelineState::Paused {
+        if web_stop_requested || pipeline_state == PipelineState::Paused {
             info!(
-                "Sync was stopped/paused (web={}, external={}). Entering paused idle state...",
-                web_stop_requested, external_stop
+                "Sync was stopped/paused (web={}). Entering paused idle state...",
+                web_stop_requested
             );
             shared_state.is_syncing.store(false, Ordering::SeqCst);
             pipeline_state = PipelineState::Paused;
+            // Release the LG histogram owner even while waiting in the
+            // paused-management loop; never leave VT resources pinned.
+            histogram_capture = None;
+            using_histogram = false;
+            capture = Box::new(MockCapture::new(
+                config.capture_width,
+                config.capture_height,
+            ));
+            shared_state
+                .capture_hardware
+                .store(false, Ordering::Relaxed);
+            media_class = PlaybackClass::Unknown;
+            drm_router = DrmCaptureRouter::default();
+            drm_router.set_mode(config.capture_mode);
+            if let Some(task) = media_query.take() {
+                task.abort();
+            }
+            color_pipeline.reset();
+            output_gate.clear();
+            shared_state.capture_source.store(2, Ordering::Relaxed);
+            for (device, _, _) in &mut wled_outputs {
+                let black = vec![RgbColor::new(0, 0, 0); device.led_count()];
+                let _ = device.send(&LightFrame {
+                    colors: &black,
+                    source: ColorSource::Frame,
+                });
+            }
 
             // Deactivate Hue stream on bridge if web requested stop
             if (web_stop_requested || (auto_tv_power && observed_tv_power == Some(false)))
@@ -803,7 +1191,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         }
                     }
 
-                    if !hue_resumed {
+                    if !hue_resumed
+                        && !(config.wled_sync_enabled && !wled_outputs.is_empty())
+                        && !(nanoleaf_active && nanoleaf_sync_enabled)
+                    {
                         shared_state.is_syncing.store(false, Ordering::SeqCst);
                         continue;
                     }
@@ -865,8 +1256,6 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 observed_tv_power = None;
                 last_tv_power_poll = tokio::time::Instant::now() - Duration::from_secs(2);
             }
-            current_hue_brightness = live_st.brightness_multiplier * live_st.hue_output_brightness;
-            current_use_xy = live_st.use_xy_gamut;
             *shared_state.hue_zones.write().unwrap() = config.zones.clone();
             if hue_sync_enabled != live_st.hue_sync_enabled {
                 hue_sync_enabled = live_st.hue_sync_enabled;
@@ -920,6 +1309,20 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         .store(false, Ordering::Relaxed);
                 }
             }
+            color_pipeline.tune(
+                live_st.saturation_boost,
+                live_st.noise_gate_threshold,
+                live_st.gamma,
+                live_st.peak_weight,
+                live_st.rise_smoothing_factor,
+                live_st.fall_smoothing_factor,
+                live_st.strict_blackout,
+                live_st.max_color_step,
+                live_st.hdr_tone_mapping,
+                live_st.letterbox_detection,
+                live_st.spatial_blend,
+            );
+            output_gate.clear();
             if let Some(ref mut s) = hue_sampler {
                 s.set_temporal_response(
                     live_st.rise_smoothing_factor,
@@ -955,11 +1358,11 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
             info!(
                 "Applied live settings: Hue={:.1}x, Nanoleaf={:.1}x, saturation={:.1}x, smoothing={:.2}, xy_mode={}",
-                current_hue_brightness,
+                live_st.brightness_multiplier * live_st.hue_output_brightness,
                 live_st.brightness_multiplier * live_st.nanoleaf_output_brightness,
                 live_st.saturation_boost,
                 live_st.smoothing_factor,
-                current_use_xy
+                live_st.use_xy_gamut
             );
         }
 
@@ -1128,16 +1531,71 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 continue 'sync_loop;
             }
             capture_faulted = false;
+            histogram_capture = None;
+            using_histogram = false;
+            color_pipeline.reset();
+            output_gate.clear();
             capture_recovery = CaptureRecovery::default();
             capture_retry.success();
-            capture = create_capture(config.capture_width, config.capture_height);
+            media_class = PlaybackClass::Unknown;
+            drm_router = DrmCaptureRouter::default();
+            drm_router.set_mode(config.capture_mode);
+            if let Some(task) = media_query.take() {
+                task.abort();
+            }
+            capture = Box::new(MockCapture::new(
+                config.capture_width,
+                config.capture_height,
+            ));
             shared_state
                 .capture_hardware
                 .store(capture.is_real_hardware(), Ordering::Relaxed);
         }
 
         if pipeline_state == PipelineState::Paused {
+            histogram_capture = None;
             continue 'sync_loop;
+        }
+
+        // Reconnect each configured vendor independently.
+        if hue_active && hue_sync_enabled && hue_dtls.is_none() && hue_retry.ready() {
+            match reconnect_hue(&config) {
+                Ok(client) => {
+                    hue_dtls = Some(client);
+                    hue_retry.success();
+                    shared_state.hue_connected.store(true, Ordering::Relaxed);
+                    output_gate.clear();
+                }
+                Err(err) => {
+                    hue_retry.failure();
+                    warn!("Hue reconnect unavailable: {err}");
+                }
+            }
+        }
+        if nanoleaf_active
+            && nanoleaf_sync_enabled
+            && nanoleaf_streamer.is_none()
+            && nanoleaf_retry.ready()
+        {
+            if let (Some(cfg), Some(layout)) = (config.nanoleaf.as_ref(), nanoleaf_sampler.as_ref())
+            {
+                match nanoleaf::enable_external_control(&cfg.ip, &cfg.auth_token)
+                    .and_then(|port| NanoleafUdpStreamer::new(&cfg.ip, port, layout.panel_ids()))
+                {
+                    Ok(transport) => {
+                        nanoleaf_streamer = Some(transport);
+                        nanoleaf_retry.success();
+                        shared_state
+                            .nanoleaf_connected
+                            .store(true, Ordering::Relaxed);
+                        output_gate.clear();
+                    }
+                    Err(err) => {
+                        nanoleaf_retry.failure();
+                        warn!("Nanoleaf reconnect unavailable: {err}");
+                    }
+                }
+            }
         }
 
         // In auto FPS mode, dynamically update cadence if TV source rate changed (e.g. film started)
@@ -1155,6 +1613,231 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 }
             }
         }
+
+        // Query Luna's PRIVATE bus in interactive mode. On C5 the -n 1
+        // shortcut exits successfully but emits no response. Run requests
+        // in bounded background tasks so a missing service cannot freeze
+        // the capture/lighting cadence.
+        if model_query.as_ref().is_some_and(|task| task.is_finished()) {
+            let completed = model_query.take().expect("checked above");
+            tv_model = completed.await.ok().flatten();
+            if !config.histogram.matches_tv_model(tv_model.as_deref())
+                && last_model_warning.elapsed() >= Duration::from_secs(60)
+            {
+                warn!("C5 histogram spatial profile not valid for TV model {:?}; refusing spatial mapping", tv_model);
+                last_model_warning = tokio::time::Instant::now();
+            }
+        }
+        if model_query.is_none() && last_model_check.elapsed() >= Duration::from_secs(30) {
+            last_model_check = tokio::time::Instant::now();
+            model_query = Some(tokio::spawn(capture::media::query_tv_model()));
+        }
+
+        if media_query.as_ref().is_some_and(|task| task.is_finished()) {
+            let completed = media_query.take().expect("checked above");
+            media_class = completed.await.unwrap_or(PlaybackClass::Unknown);
+            shared_state.playback_class.store(
+                match media_class {
+                    PlaybackClass::Unknown => 0,
+                    PlaybackClass::Clear => 1,
+                    PlaybackClass::Protected => 2,
+                },
+                Ordering::Relaxed,
+            );
+        }
+        if media_query.is_none() && last_media_check.elapsed() >= Duration::from_secs(1) {
+            last_media_check = tokio::time::Instant::now();
+            media_query = Some(tokio::spawn(capture::media::query()));
+        }
+        let route = drm_router.decide(
+            media_class,
+            if histogram_capture.is_some() {
+                HistogramHealth::Valid
+            } else {
+                HistogramHealth::NotReady
+            },
+            std::time::Instant::now(),
+        );
+        let needs_histogram = route.source != Source::Frame;
+        // Release VT frame ownership as soon as clear classification is lost.
+        if needs_histogram && capture.is_real_hardware() {
+            capture = Box::new(MockCapture::new(
+                config.capture_width,
+                config.capture_height,
+            ));
+            shared_state
+                .capture_hardware
+                .store(false, Ordering::Relaxed);
+            color_pipeline.reset();
+            output_gate.clear();
+        }
+        if needs_histogram {
+            if !using_histogram {
+                // Exclusive VT owner: drop frame capture before LG histogram init.
+                capture = Box::new(MockCapture::new(
+                    config.capture_width,
+                    config.capture_height,
+                ));
+                shared_state
+                    .capture_hardware
+                    .store(false, Ordering::Relaxed);
+                using_histogram = true;
+                color_pipeline.reset();
+                output_gate.clear();
+                histogram_black_sent = false;
+                last_histogram_valid = None;
+                info!("DRM-first source selected: LG histogram; releasing frame capture");
+            }
+            // A Hold decision may authorize attempting the separate
+            // histogram backend, but must never authorize sampling or output.
+            // In particular, the C5's known stub fingerprint fails before
+            // entering any native histogram implementation.
+            let histogram_candidate = (media_class == PlaybackClass::Protected
+                && config.capture_mode != capture::drm_routing::CaptureMode::FrameOnly)
+                || (media_class == PlaybackClass::Clear
+                    && config.capture_mode == capture::drm_routing::CaptureMode::HistogramOnly);
+            if !histogram_candidate && route.source == Source::Hold {
+                histogram_capture = None;
+            }
+            if histogram_candidate
+                && histogram_capture.is_none()
+                && last_histogram_attempt.elapsed() >= Duration::from_secs(3)
+            {
+                last_histogram_attempt = tokio::time::Instant::now();
+                match HistogramCapture::try_new() {
+                    Ok(driver) => {
+                        histogram_capture = Some(driver);
+                        info!("LG histogram initialized, awaiting populated measurements");
+                    }
+                    Err(err) => warn!("LG histogram unavailable: {err:#}"),
+                }
+            }
+            let mut new_colors = None;
+            if route.source == Source::Histogram {
+                if let Some(driver) = histogram_capture.as_mut() {
+                    match driver.sample() {
+                        Ok(colors) => new_colors = Some(colors),
+                        Err(err) => {
+                            warn!("LG histogram read interrupted: {err:#}");
+                            histogram_capture = None;
+                            last_histogram_attempt = tokio::time::Instant::now();
+                        }
+                    }
+                }
+            }
+
+            let processed_field = if let Some(regions) = new_colors {
+                if !config.histogram.matches_tv_model(tv_model.as_deref()) {
+                    // No inferred spatial map or vendor-specific colour path.
+                    None
+                } else {
+                    match color_pipeline.histogram(&regions, &config.histogram) {
+                        Ok(field) => Some(field),
+                        Err(error) => {
+                            warn!("Rejected invalid histogram colour field: {error:#}");
+                            None
+                        }
+                    }
+                }
+            } else {
+                None
+            };
+            if let Some(field) = processed_field {
+                last_histogram_valid = Some(std::time::Instant::now());
+                histogram_black_sent = false;
+                shared_state.capture_source.store(1, Ordering::Relaxed);
+                let settings = shared_state.current_settings.read().unwrap().clone();
+                let mut fanout = OutputFanout {
+                    field: &field,
+                    config: &config,
+                    settings: &settings,
+                    shared: &shared_state,
+                    wled: &mut wled_outputs,
+                    hue_transport: &mut hue_dtls,
+                    hue_packets: &mut hue_packet_builder,
+                    nanoleaf_transport: &mut nanoleaf_streamer,
+                    nanoleaf_layout: &nanoleaf_sampler,
+                    hue_enabled: hue_active && hue_sync_enabled,
+                    nanoleaf_enabled: nanoleaf_active && nanoleaf_sync_enabled,
+                    hue_retry: &mut hue_retry,
+                    nanoleaf_retry: &mut nanoleaf_retry,
+                    gate: &mut output_gate,
+                };
+                emitted_light_update = fanout.publish();
+            } else {
+                shared_state.capture_source.store(2, Ordering::Relaxed);
+                // Fail closed, not by sending the synthetic MockCapture's colours.
+                // Hold last real colour for <=500ms, then explicitly send black.
+                let expired =
+                    last_histogram_valid.is_none_or(|t| t.elapsed() > Duration::from_millis(500));
+                if expired && !histogram_black_sent {
+                    histogram_black_sent = true;
+                    output_gate.clear();
+                    for (device, _, _) in &mut wled_outputs {
+                        let black = vec![RgbColor::new(0, 0, 0); device.led_count()];
+                        let _ = device.send(&LightFrame {
+                            colors: &black,
+                            source: ColorSource::Histogram,
+                        });
+                    }
+                    if let Some(ref mut nl) = nanoleaf_streamer {
+                        let black = vec![RgbColor::new(0, 0, 0); nl.panel_count()];
+                        let _ = nl.send(&LightFrame {
+                            colors: &black,
+                            source: ColorSource::Histogram,
+                        });
+                    }
+                    if let (Some(ref mut dtls), Some(ref mut packets)) =
+                        (&mut hue_dtls, &mut hue_packet_builder)
+                    {
+                        let ids: Vec<u8> = config.zones.iter().map(|z| z.channel_id).collect();
+                        let black = vec![RgbColor::new(0, 0, 0); ids.len()];
+                        let mut output = HueOutput {
+                            transport: dtls,
+                            packets,
+                            channel_ids: &ids,
+                            use_xy: false,
+                        };
+                        let _ = output.send(&LightFrame {
+                            colors: &black,
+                            source: ColorSource::Histogram,
+                        });
+                    }
+                }
+            }
+            if emitted_light_update {
+                light_update_count = light_update_count.saturating_add(1);
+            }
+            let update_elapsed = light_update_window.elapsed();
+            if update_elapsed >= Duration::from_secs(1) {
+                shared_state
+                    .set_light_update_fps(light_update_count as f32 / update_elapsed.as_secs_f32());
+                light_update_count = 0;
+                light_update_window = tokio::time::Instant::now();
+            }
+            if !runtime::wait_for_capture_retry(frame_interval, &shutdown).await {
+                break 'sync_loop;
+            }
+            continue 'sync_loop;
+        }
+
+        if using_histogram {
+            // Confirm histogram resource is released before reacquiring scaler.
+            histogram_capture = None;
+            using_histogram = false;
+            color_pipeline.reset();
+            output_gate.clear();
+            histogram_black_sent = false;
+            last_histogram_valid = None;
+            capture = create_capture(config.capture_width, config.capture_height);
+            shared_state
+                .capture_hardware
+                .store(capture.is_real_hardware(), Ordering::Relaxed);
+            capture_retry.success();
+            capture_recovery = CaptureRecovery::default();
+            info!("Unprotected media stable; returned to normal frame capture");
+        }
+        shared_state.capture_source.store(0, Ordering::Relaxed);
 
         // If currently on fallback MockCapture, rapidly probe if hardware VtCapture has become available
         // (e.g. if the TV was on the home screen at boot or during input/format switch)
@@ -1179,224 +1862,34 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 if hardware_frame {
                     capture_recovery.frame_received(std::time::Instant::now());
                 }
-                let mut is_scene_cut = false;
-
-                if !hue_sync_enabled && nanoleaf_sync_enabled {
-                    nanoleaf_only_frame_count += 1;
-                    let global =
-                        frame_average(frame.data, frame.width, frame.height, frame.is_bgra);
-                    is_scene_cut =
-                        nanoleaf_only_frame_count > 1 && global.delta(nanoleaf_only_global) > 0.35;
-                    nanoleaf_only_global = global;
-                    if config.letterbox_detection
-                        && (nanoleaf_only_frame_count == 1
-                            || nanoleaf_only_frame_count.is_multiple_of(15))
+                // Processing is independent of which outputs are enabled.
+                // A synthetic MockCapture is never published to real lights.
+                if hardware_frame {
+                    match color_pipeline.frame(frame.data, frame.width, frame.height, frame.is_bgra)
                     {
-                        if let Some(ref mut sampler) = nanoleaf_sampler {
-                            sampler.set_active_rect(ZoneSampler::detect_active_rect(
-                                frame.data,
-                                frame.width,
-                                frame.height,
-                                frame.is_bgra,
-                            ));
-                        }
-                    }
-                }
-
-                // 1. Process Philips Hue entertainment zones
-                if hue_active && hue_sync_enabled {
-                    if let (Some(ref mut sampler), Some(ref mut dtls), Some(ref mut builder)) =
-                        (&mut hue_sampler, &mut hue_dtls, &mut hue_packet_builder)
-                    {
-                        let (sampled_zones, cut) = sampler.sample_frame(
-                            frame.data,
-                            frame.width,
-                            frame.height,
-                            frame.is_bgra,
-                        );
-                        is_scene_cut = cut;
-
-                        let active_rect = sampler.active_rect();
-                        if let Some(ref mut nl_s) = nanoleaf_sampler {
-                            nl_s.set_active_rect(active_rect);
-                        }
-
-                        let calibration = calibration_pattern(&shared_state);
-                        let sampled_zones = calibration
-                            .map(|pattern| calibration_zone_colors(pattern, &config.zones))
-                            .unwrap_or(sampled_zones);
-                        let channels: Vec<(u8, (u16, u16, u16))> = sampled_zones
-                            .iter()
-                            .map(|(channel_id, color)| {
-                                let scaled = if calibration.is_some() {
-                                    *color
-                                } else {
-                                    color.scale(current_hue_brightness)
-                                };
-                                if calibration.is_none() && current_use_xy {
-                                    (*channel_id, scaled.to_xy_u16(color::HueGamut::GamutC))
-                                } else {
-                                    (*channel_id, scaled.to_u16())
-                                }
-                            })
-                            .collect();
-
-                        // Share live sampled Hue colors with Web UI
-                        *shared_state.live_hue_colors.write().unwrap() = sampled_zones;
-
-                        // Adaptive deadband throttling for Hue Bridge
-                        let is_virtually_identical =
-                            if !last_channels.is_empty() && last_channels.len() == channels.len() {
-                                last_channels.iter().zip(&channels).all(
-                                    |((_, (a1, a2, a3)), (_, (b1, b2, b3)))| {
-                                        (*a1 as i32 - *b1 as i32).abs() < 350
-                                            && (*a2 as i32 - *b2 as i32).abs() < 350
-                                            && (*a3 as i32 - *b3 as i32).abs() < 350
-                                    },
-                                )
-                            } else {
-                                false
+                        Ok(field) => {
+                            let settings = shared_state.current_settings.read().unwrap().clone();
+                            let mut fanout = OutputFanout {
+                                field: &field,
+                                config: &config,
+                                settings: &settings,
+                                shared: &shared_state,
+                                wled: &mut wled_outputs,
+                                hue_transport: &mut hue_dtls,
+                                hue_packets: &mut hue_packet_builder,
+                                nanoleaf_transport: &mut nanoleaf_streamer,
+                                nanoleaf_layout: &nanoleaf_sampler,
+                                hue_enabled: hue_active && hue_sync_enabled,
+                                nanoleaf_enabled: nanoleaf_active && nanoleaf_sync_enabled,
+                                hue_retry: &mut hue_retry,
+                                nanoleaf_retry: &mut nanoleaf_retry,
+                                gate: &mut output_gate,
                             };
-
-                        let should_send = if config.adaptive_throttling {
-                            if is_virtually_identical {
-                                static_frame_count = static_frame_count.saturating_add(1);
-                                if last_heartbeat.elapsed() >= Duration::from_millis(500) {
-                                    last_heartbeat = tokio::time::Instant::now();
-                                    true
-                                } else {
-                                    false
-                                }
-                            } else {
-                                static_frame_count = 0;
-                                last_heartbeat = tokio::time::Instant::now();
-                                true
-                            }
-                        } else {
-                            true
-                        };
-
-                        if should_send {
-                            let packet = if calibration.is_none() && current_use_xy {
-                                builder.build_xy_packet(&channels)
-                            } else {
-                                builder.build_rgb_packet(&channels)
-                            };
-
-                            if let Err(e) = dtls.send(&packet) {
-                                shared_state.hue_connected.store(false, Ordering::Relaxed);
-                                error!("Failed to send DTLS HueStream packet: {}", e);
-                                if hue_retry.ready() {
-                                    match reconnect_hue(&config) {
-                                        Ok(new_dtls) => {
-                                            *dtls = new_dtls;
-                                            hue_retry.success();
-                                            shared_state
-                                                .hue_connected
-                                                .store(true, Ordering::Relaxed);
-                                            info!("[+] Successfully reconnected Hue DTLS session.");
-                                        }
-                                        Err(conn_err) => {
-                                            let delay = hue_retry.failure();
-                                            warn!(
-                                                "DTLS reconnect failed: {}. Retrying in {:.1}s.",
-                                                conn_err,
-                                                delay.as_secs_f32()
-                                            );
-                                        }
-                                    }
-                                }
-                            } else {
-                                hue_retry.success();
-                                shared_state.hue_connected.store(true, Ordering::Relaxed);
-                                emitted_light_update = true;
-                            }
-                            last_channels = channels;
+                            emitted_light_update = fanout.publish();
                         }
-                    }
-                }
-
-                // 2. Process Nanoleaf 4D TV perimeter lightstrip
-                if nanoleaf_active && nanoleaf_sync_enabled {
-                    if let (Some(ref mut nl_sampler), Some(ref mut nl_streamer)) =
-                        (&mut nanoleaf_sampler, &mut nanoleaf_streamer)
-                    {
-                        let nl_colors = nl_sampler.sample_frame(
-                            frame.data,
-                            frame.width,
-                            frame.height,
-                            frame.is_bgra,
-                            is_scene_cut,
-                        );
-                        let nl_colors = calibration_pattern(&shared_state)
-                            .map(|pattern| calibration_perimeter_colors(pattern, nl_colors.len()))
-                            .unwrap_or(nl_colors);
-
-                        // Share live sampled Nanoleaf colors with Web UI
-                        *shared_state.live_nanoleaf_colors.write().unwrap() = nl_colors.clone();
-                        let nanoleaf_changed = colors_changed(&last_nanoleaf_colors, &nl_colors);
-                        let should_send = !config.adaptive_throttling
-                            || nanoleaf_changed
-                            || last_nanoleaf_heartbeat.elapsed() >= Duration::from_millis(500);
-                        if should_send {
-                            last_nanoleaf_heartbeat = tokio::time::Instant::now();
-                            if let Err(e) = nl_streamer.send_frame(&nl_colors, 0) {
-                                shared_state
-                                    .nanoleaf_connected
-                                    .store(false, Ordering::Relaxed);
-                                warn!(
-                                "Nanoleaf UDP frame send error ({}). Triggering external control refresh...",
-                                e
-                            );
-                                if nanoleaf_retry.ready() {
-                                    if let Some(ref n_cfg) = config.nanoleaf {
-                                        match nanoleaf::enable_external_control(
-                                            &n_cfg.ip,
-                                            &n_cfg.auth_token,
-                                        ) {
-                                            Ok(port) => {
-                                                info!(
-                                                "[+] Re-enabled Nanoleaf external control on UDP port {}.",
-                                                port
-                                            );
-                                                match NanoleafUdpStreamer::new(
-                                                    &n_cfg.ip,
-                                                    port,
-                                                    nl_streamer.panel_ids().to_vec(),
-                                                ) {
-                                                    Ok(new_streamer) => {
-                                                        *nl_streamer = new_streamer;
-                                                        nanoleaf_retry.success();
-                                                    }
-                                                    Err(recreate_err) => {
-                                                        let delay = nanoleaf_retry.failure();
-                                                        error!(
-                                                        "Failed to recreate Nanoleaf streamer: {}. Retrying in {:.1}s.",
-                                                        recreate_err,
-                                                        delay.as_secs_f32()
-                                                    );
-                                                    }
-                                                }
-                                            }
-                                            Err(ext_err) => {
-                                                let delay = nanoleaf_retry.failure();
-                                                error!(
-                                                "Failed to refresh Nanoleaf external control: {}. Retrying in {:.1}s.",
-                                                ext_err,
-                                                delay.as_secs_f32()
-                                            );
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                nanoleaf_retry.success();
-                                shared_state
-                                    .nanoleaf_connected
-                                    .store(true, Ordering::Relaxed);
-                                last_nanoleaf_colors = nl_colors;
-                                emitted_light_update = true;
-                            }
+                        Err(error) => {
+                            warn!("Rejected malformed capture sample: {error:#}");
+                            color_pipeline.reset();
                         }
                     }
                 }
@@ -1464,8 +1957,11 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     }
                 }
 
-                // Re-initialize capture driver
-                capture = create_capture(config.capture_width, config.capture_height);
+                // Route again after retry delay; never initialize from stale media state.
+                capture = Box::new(MockCapture::new(
+                    config.capture_width,
+                    config.capture_height,
+                ));
                 shared_state
                     .capture_hardware
                     .store(capture.is_real_hardware(), Ordering::Relaxed);
@@ -1583,8 +2079,622 @@ async fn run_test_nanoleaf(config_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Probe only aggregate RGB histogram counts. This is an opt-in hardware
+/// operation: initialization may create a temporary LG developer marker and
+/// acquire exclusive VT capture ownership. No LEDs, frames or pixels sent.
+async fn run_test_histogram(
+    acknowledge_native_capture: bool,
+    samples: u8,
+    interval_ms: u64,
+) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "native capture probe requires --acknowledge-native-capture;              stop other VT owners and review docs/LG_C5_HISTOGRAM_PROBE.md"
+        ));
+    }
+    if !(2..=20).contains(&samples) {
+        return Err(anyhow!("samples must be between 2 and 20"));
+    }
+    if !(100..=2000).contains(&interval_ms) {
+        return Err(anyhow!("interval-ms must be between 100 and 2000"));
+    }
+    info!(
+        "Initializing LG native histogram for {} samples, {}ms interval; no light output",
+        samples, interval_ms
+    );
+    let mut capture = HistogramCapture::try_new().context(
+        "LG histogram init failed; do not start competing capture or change system flags",
+    )?;
+    let mut previous: Option<[RgbColor; 16]> = None;
+    let mut valid_samples = 0usize;
+    let mut failed_samples = 0usize;
+    let mut changed_transitions = 0usize;
+    for sample_id in 1..=samples {
+        match capture.sample() {
+            Ok(regions) => {
+                valid_samples += 1;
+                let changed_regions = previous
+                    .as_ref()
+                    .map(|last| {
+                        last.iter()
+                            .zip(regions.iter())
+                            .filter(|(a, b)| {
+                                a.r.abs_diff(b.r) >= 4
+                                    || a.g.abs_diff(b.g) >= 4
+                                    || a.b.abs_diff(b.b) >= 4
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+                if previous.is_some() && changed_regions != 0 {
+                    changed_transitions += 1;
+                }
+                let region_summary = regions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, rgb)| {
+                        format!("{index:02}={:03},{:03},{:03}", rgb.r, rgb.g, rgb.b)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                info!(
+                    "HISTOGRAM_SAMPLE {}/{} changed_regions={} {}",
+                    sample_id, samples, changed_regions, region_summary
+                );
+                previous = Some(regions);
+            }
+            Err(error) => {
+                failed_samples += 1;
+                warn!(
+                    "HISTOGRAM_SAMPLE {}/{} unavailable: {error:#}",
+                    sample_id, samples
+                );
+            }
+        }
+        if sample_id != samples {
+            tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+        }
+    }
+    drop(capture); // finalize LG VT ownership before reporting outcome.
+    info!(
+        "HISTOGRAM_RESULT valid={} failed={} changed_transitions={}",
+        valid_samples, failed_samples, changed_transitions
+    );
+    if valid_samples < 2 {
+        return Err(anyhow!(
+            "histogram did not yield two valid samples; check the native error lines"
+        ));
+    }
+    if changed_transitions == 0 {
+        warn!("No measurable regional change; scene may be static or histogram input unavailable");
+    }
+    Ok(())
+}
+
+/// One-time opt-in test: validate three spaced, fresh media classifications
+/// before entering LG's native create/init/finalize/release path. No capture
+/// property selection, stream setup, output delivery, or buffer access.
+async fn run_test_frame_init(acknowledge_native_capture: bool) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "test-frame-init requires --acknowledge-native-capture; native init may acquire exclusive LG VT resources"
+        ));
+    }
+    for sample in 1..=3 {
+        let class = capture::media::query().await;
+        if class != PlaybackClass::Clear {
+            return Err(anyhow!(
+                "FRAME_INIT_REFUSED: media sample {sample}/3 is {class:?}; only positively identified Clear content is permitted"
+            ));
+        }
+        if sample < 3 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    info!("FRAME_INIT_CLEAR_GATE_PASS: 3/3 spaced Clear classifications");
+    VtCapture::probe_init_only()
+}
+
+#[cfg(test)]
+mod c5_frame_init_cli_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn missing_acknowledgement_rejects_before_media_or_native_access() {
+        let error = run_test_frame_init(false).await.expect_err("must refuse");
+        assert!(error.to_string().contains("--acknowledge-native-capture"));
+    }
+
+    #[test]
+    fn frame_init_command_requires_explicit_user_action() {
+        let parsed = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-frame-init",
+            "--acknowledge-native-capture",
+        ])
+        .expect("subcommand and acknowledgement parse");
+        assert!(matches!(
+            parsed.command,
+            Commands::TestFrameInit {
+                acknowledge_native_capture: true
+            }
+        ));
+    }
+}
+
+/// Preprocess can enable the VT display-output hardware momentarily. Require
+/// explicit owner intent and independently fresh, repeated media clearance.
+/// A refusal is terminal: do not switch native dump modes or retry.
+async fn run_test_frame_metadata(acknowledge_native_capture: bool) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "test-frame-metadata requires --acknowledge-native-capture; preprocess may enable the LG scaler"
+        ));
+    }
+    for sample in 1..=3 {
+        let class = capture::media::query().await;
+        if class != PlaybackClass::Clear {
+            return Err(anyhow!(
+                "FRAME_METADATA_REFUSED: media sample {sample}/3 is {class:?}; Unknown/Protected cannot be captured"
+            ));
+        }
+        if sample < 3 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    info!("FRAME_METADATA_CLEAR_GATE_PASS: 3/3 spaced Clear classifications");
+    VtCapture::probe_preprocess_metadata()
+}
+
+#[cfg(test)]
+mod c5_frame_metadata_cli_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn metadata_command_requires_acknowledgement_before_native_access() {
+        let error = run_test_frame_metadata(false)
+            .await
+            .expect_err("must refuse");
+        assert!(error.to_string().contains("--acknowledge-native-capture"));
+    }
+
+    #[test]
+    fn metadata_cli_command_parses_with_opt_in() {
+        let parsed = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-frame-metadata",
+            "--acknowledge-native-capture",
+        ])
+        .expect("metadata CLI parse");
+        assert!(matches!(
+            parsed.command,
+            Commands::TestFrameMetadata {
+                acknowledge_native_capture: true
+            }
+        ));
+    }
+}
+
+/// One process call against verified unprotected media. The synchronous native
+/// call is bounded externally by the owner's timeout and cleans up normally.
+async fn run_test_frame_process(acknowledge_native_capture: bool) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "test-frame-process requires --acknowledge-native-capture; process may activate LG VT capture"
+        ));
+    }
+    for sample in 1..=3 {
+        let class = capture::media::query().await;
+        if class != PlaybackClass::Clear {
+            return Err(anyhow!(
+                "FRAME_PROCESS_REFUSED: media sample {sample}/3 is {class:?}; requires independently known unprotected media"
+            ));
+        }
+        if sample < 3 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    info!("FRAME_PROCESS_CLEAR_GATE_PASS: 3/3 spaced Clear classifications");
+    VtCapture::probe_process_no_buffers()
+}
+
+#[cfg(test)]
+mod c5_frame_process_cli_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn process_probe_requires_acknowledgement() {
+        let error = run_test_frame_process(false)
+            .await
+            .expect_err("must refuse before querying media");
+        assert!(error.to_string().contains("--acknowledge-native-capture"));
+    }
+
+    #[test]
+    fn process_subcommand_parses_explicit_opt_in() {
+        let parsed = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-frame-process",
+            "--acknowledge-native-capture",
+        ])
+        .expect("process command parses");
+        assert!(matches!(
+            parsed.command,
+            Commands::TestFrameProcess {
+                acknowledge_native_capture: true
+            }
+        ));
+    }
+}
+
+/// One native descriptor request on a known-clear display-output path.
+/// The Rust implementation does not dereference or expose returned addresses.
+async fn run_test_frame_descriptor(acknowledge_native_capture: bool) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "test-frame-descriptor requires --acknowledge-native-capture; this can activate LG VT hardware"
+        ));
+    }
+    for sample in 1..=3 {
+        let class = capture::media::query().await;
+        if class != PlaybackClass::Clear {
+            return Err(anyhow!(
+                "FRAME_DESCRIPTOR_REFUSED: media sample {sample}/3 is {class:?}; only independently known clear content"
+            ));
+        }
+        if sample < 3 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    info!("FRAME_DESCRIPTOR_CLEAR_GATE_PASS: 3/3 spaced Clear classifications");
+    VtCapture::probe_buffer_descriptor_once()
+}
+
+#[cfg(test)]
+mod c5_frame_descriptor_cli_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn descriptor_probe_requires_acknowledgement() {
+        let error = run_test_frame_descriptor(false)
+            .await
+            .expect_err("reject unacknowledged descriptor call");
+        assert!(error.to_string().contains("--acknowledge-native-capture"));
+    }
+
+    #[test]
+    fn descriptor_subcommand_is_distinct_from_capture() {
+        let parsed = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-frame-descriptor",
+            "--acknowledge-native-capture",
+        ])
+        .expect("descriptor CLI parses");
+        assert!(matches!(
+            parsed.command,
+            Commands::TestFrameDescriptor {
+                acknowledge_native_capture: true
+            }
+        ));
+    }
+}
+
+/// One live VMA inspection against an opaque vendor buffer descriptor.
+/// Reads only /proc/self/maps, not contents at the vendor-provided addresses.
+async fn run_test_frame_mapping(acknowledge_native_capture: bool) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "test-frame-mapping requires --acknowledge-native-capture; native processing may acquire hardware"
+        ));
+    }
+    for sample in 1..=3 {
+        let class = capture::media::query().await;
+        if class != PlaybackClass::Clear {
+            return Err(anyhow!(
+                "FRAME_MAPPING_REFUSED: media sample {sample}/3 is {class:?}; Unknown/Protected never qualifies"
+            ));
+        }
+        if sample < 3 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    info!("FRAME_MAPPING_CLEAR_GATE_PASS: 3/3 spaced Clear classifications");
+    VtCapture::probe_buffer_mappings_once()
+}
+
+#[cfg(test)]
+mod c5_frame_mapping_cli_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mapping_requires_explicit_acknowledgement() {
+        let error = run_test_frame_mapping(false)
+            .await
+            .expect_err("no native operation without opt in");
+        assert!(error.to_string().contains("--acknowledge-native-capture"));
+    }
+
+    #[test]
+    fn mapping_command_uses_distinct_subcommand() {
+        let parsed = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-frame-mapping",
+            "--acknowledge-native-capture",
+        ])
+        .expect("parse mapping CLI");
+        assert!(matches!(
+            parsed.command,
+            Commands::TestFrameMapping {
+                acknowledge_native_capture: true
+            }
+        ));
+    }
+}
+
+/// First content-read boundary. Three bytes only, using process_vm_readv
+/// against own readable mappings. The sample values are never logged or kept.
+async fn run_test_frame_kernel_copy(acknowledge_native_capture: bool) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "test-frame-kernel-copy requires --acknowledge-native-capture; performs a bounded native pixel read"
+        ));
+    }
+    for sample in 1..=3 {
+        let class = capture::media::query().await;
+        if class != PlaybackClass::Clear {
+            return Err(anyhow!(
+                "FRAME_KERNEL_COPY_REFUSED: media sample {sample}/3 is {class:?}; only independently verified Clear media"
+            ));
+        }
+        if sample < 3 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    info!("FRAME_KERNEL_COPY_CLEAR_GATE_PASS: 3/3 spaced Clear classifications");
+    VtCapture::probe_three_byte_kernel_copy_once()
+}
+
+#[cfg(test)]
+mod c5_frame_kernel_copy_cli_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn kernel_copy_requires_explicit_acknowledgement() {
+        let error = run_test_frame_kernel_copy(false)
+            .await
+            .expect_err("kernel copy needs opt in");
+        assert!(error.to_string().contains("--acknowledge-native-capture"));
+    }
+
+    #[test]
+    fn kernel_copy_is_distinct_from_unrestricted_capture() {
+        let parsed = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-frame-kernel-copy",
+            "--acknowledge-native-capture",
+        ])
+        .expect("parse bounded kernel copy");
+        assert!(matches!(
+            parsed.command,
+            Commands::TestFrameKernelCopy {
+                acknowledge_native_capture: true
+            }
+        ));
+    }
+}
+
+/// Inspect only VmFlags for the Y and UV native descriptor mappings.
+/// No kernel-mediated or direct content access; no permission changes.
+async fn run_test_frame_vma_flags(acknowledge_native_capture: bool) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "test-frame-vma-flags requires --acknowledge-native-capture; uses native VT resources"
+        ));
+    }
+    for sample in 1..=3 {
+        let class = capture::media::query().await;
+        if class != PlaybackClass::Clear {
+            return Err(anyhow!(
+                "FRAME_VMA_FLAGS_REFUSED: media sample {sample}/3 is {class:?}; Unknown/Protected never qualifies"
+            ));
+        }
+        if sample < 3 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    info!("FRAME_VMA_FLAGS_CLEAR_GATE_PASS: 3/3 spaced Clear classifications");
+    VtCapture::probe_buffer_vma_flags_once()
+}
+
+#[cfg(test)]
+mod c5_frame_vma_flags_cli_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn vma_flag_probe_requires_explicit_acknowledgement() {
+        let error = run_test_frame_vma_flags(false)
+            .await
+            .expect_err("must refuse without opt in");
+        assert!(error.to_string().contains("--acknowledge-native-capture"));
+    }
+
+    #[test]
+    fn vma_flags_use_dedicated_metadata_only_command() {
+        let parsed = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-frame-vma-flags",
+            "--acknowledge-native-capture",
+        ])
+        .expect("parse VMA flags CLI");
+        assert!(matches!(
+            parsed.command,
+            Commands::TestFrameVmaFlags {
+                acknowledge_native_capture: true
+            }
+        ));
+    }
+}
+
+/// Only a V4L2 metadata query: no active media capture, frame bytes,
+/// buffer queue or vendor permission mutation. Requires explicit consent.
+fn run_test_v4l2_querycap(acknowledge_device_open: bool) -> Result<()> {
+    if !acknowledge_device_open {
+        return Err(anyhow!(
+            "test-v4l2-querycap requires --acknowledge-device-open; will briefly open /dev/video60"
+        ));
+    }
+    let report = capture::v4l2_metadata::query_c5_video60_capabilities()?;
+    info!(
+        "C5_V4L2_QUERYCAP_PASS: driver={} card={} bus_info={} version={} capabilities=0x{:08x} device_caps=0x{:08x} effective_caps=0x{:08x} capture_mplane={} streaming={} readwrite={} open_calls=1 querycap_ioctls=1 reqbufs=0 qbuf=0 dqbuf=0 stream_ops=0 pixel_reads=0 fd_closed=true",
+        report.driver,
+        report.card,
+        report.bus_info,
+        report.version,
+        report.capabilities,
+        report.device_caps,
+        report.effective_caps,
+        report.capture_mplane,
+        report.streaming,
+        report.readwrite,
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod c5_v4l2_querycap_cli_tests {
+    use super::*;
+
+    #[test]
+    fn querycap_requires_explicit_device_open_consent() {
+        let error =
+            run_test_v4l2_querycap(false).expect_err("must not open without acknowledgement");
+        assert!(error.to_string().contains("--acknowledge-device-open"));
+    }
+
+    #[test]
+    fn querycap_command_parses_distinctly_from_capture() {
+        let cli = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-v4l2-querycap",
+            "--acknowledge-device-open",
+        ])
+        .expect("querycap subcommand parses");
+        assert!(matches!(
+            cli.command,
+            Commands::TestV4l2Querycap {
+                acknowledge_device_open: true
+            }
+        ));
+    }
+}
+
+fn run_test_v4l2_formats(acknowledge_device_open: bool) -> Result<()> {
+    if !acknowledge_device_open {
+        return Err(anyhow!(
+            "test-v4l2-formats requires --acknowledge-device-open; opens /dev/video60 read-only"
+        ));
+    }
+    let report = capture::v4l2_metadata::query_c5_video60_formats()?;
+    for item in &report.formats {
+        info!(
+            "C5_V4L2_FORMAT: index={} fourcc={} description={} flags=0x{:08x}",
+            item.index, item.fourcc, item.description, item.flags
+        );
+    }
+    if let Some(current) = &report.current {
+        info!(
+            "C5_V4L2_G_FMT: width={} height={} fourcc={} num_planes={} plane_stride={:?} plane_sizeimage={:?}",
+            current.width, current.height, current.fourcc,
+            current.num_planes, current.plane_stride, current.plane_sizeimage
+        );
+    } else if report.current_unsupported {
+        info!("C5_V4L2_G_FMT_UNSUPPORTED: EINVAL or ENOTTY, no capture state changed");
+    }
+    info!(
+        "C5_V4L2_FORMATS_PASS: enumerated={} truncated={} ioctl_calls={} open_calls=1 reqbufs=0 qbuf=0 dqbuf=0 stream_ops=0 pixel_reads=0 fd_closed=true",
+        report.formats.len(), report.list_truncated, report.ioctl_calls
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod c5_v4l2_formats_cli_tests {
+    use super::*;
+
+    #[test]
+    fn formats_require_explicit_device_open_consent() {
+        let err = run_test_v4l2_formats(false).unwrap_err();
+        assert!(err.to_string().contains("--acknowledge-device-open"));
+    }
+
+    #[test]
+    fn formats_command_is_separate_from_capture() {
+        let cli = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-v4l2-formats",
+            "--acknowledge-device-open",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::TestV4l2Formats {
+                acknowledge_device_open: true
+            }
+        ));
+    }
+}
+
+/// Dedicated G_FMT-only diagnostic after ENUM_FMT returned ENOTTY.
+/// No frame access, changes to V4L2 settings, retry or alternative node.
+fn run_test_v4l2_current_format(acknowledge_device_open: bool) -> Result<()> {
+    if !acknowledge_device_open {
+        return Err(anyhow!(
+            "test-v4l2-current-format requires --acknowledge-device-open; opens /dev/video60 read-only"
+        ));
+    }
+    let result = capture::v4l2_metadata::query_c5_video60_current_format()?;
+    info!(
+        "C5_V4L2_G_FMT_PASS: width={} height={} fourcc={} num_planes={} plane_stride={:?} plane_sizeimage={:?} device_open_calls=1 querycap=1 g_fmt=1 enum_fmt=0 s_fmt=0 reqbufs=0 qbuf=0 dqbuf=0 stream_ops=0 pixel_reads=0 fd_closed=true",
+        result.width, result.height, result.fourcc, result.num_planes,
+        result.plane_stride, result.plane_sizeimage
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod c5_v4l2_current_format_cli_tests {
+    use super::*;
+
+    #[test]
+    fn current_format_requires_explicit_opt_in() {
+        let err = run_test_v4l2_current_format(false).unwrap_err();
+        assert!(err.to_string().contains("--acknowledge-device-open"));
+    }
+
+    #[test]
+    fn current_format_is_dedicated_not_enumeration_command() {
+        let cli = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-v4l2-current-format",
+            "--acknowledge-device-open",
+        ])
+        .expect("parse G_FMT-only command");
+        assert!(matches!(
+            cli.command,
+            Commands::TestV4l2CurrentFormat {
+                acknowledge_device_open: true
+            }
+        ));
+    }
+}
+
 async fn run_test_capture(config_path: PathBuf, raw_nv12_stats: bool) -> Result<()> {
     let config = Config::load(&config_path)?;
+    // This test bypasses the live router, so enforce independent clearance.
+    let class = capture::media::query().await;
+    if class != PlaybackClass::Clear {
+        return Err(anyhow!("test-capture requires positively identified clear media, got {class:?}; HDMI Unknown is not clearance"));
+    }
     if raw_nv12_stats {
         info!(
             "TV reports {} mode; this does not establish the capture colour space",
@@ -1616,6 +2726,11 @@ async fn run_test_capture(config_path: PathBuf, raw_nv12_stats: bool) -> Result<
         return Err(anyhow!("fewer than five fresh NV12 frames were available"));
     }
     let mut capture = create_capture(config.capture_width, config.capture_height);
+    if !capture.is_real_hardware() {
+        return Err(anyhow!(
+            "test-capture has no validated native frame source (mock capture is not TV data)"
+        ));
+    }
     let mut sampler = ZoneSampler::new(
         config.zones.clone(),
         0.35,
@@ -1709,8 +2824,11 @@ mod tests {
     #[test]
     fn duplicate_output_frames_are_suppressed_but_meaningful_changes_pass() {
         let previous = vec![RgbColor::new(10, 20, 30)];
-        assert!(!colors_changed(&previous, &previous));
-        assert!(colors_changed(&previous, &[RgbColor::new(13, 20, 30)]));
+        let mut gate = OutputGate::default();
+        assert!(gate.should_send("hue", &previous, true));
+        gate.record("hue", &previous);
+        assert!(!gate.should_send("hue", &previous, true));
+        assert!(gate.should_send("hue", &[RgbColor::new(13, 20, 30)], true));
     }
 
     #[test]

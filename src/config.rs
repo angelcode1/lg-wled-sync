@@ -153,6 +153,29 @@ fn default_nanoleaf_segments() -> u16 {
     30
 }
 
+/// WLED is the default supported *new* device, not an implicit network
+/// destination: the user must configure its address explicitly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WledConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub ip: String,
+    #[serde(default = "default_wled_port")]
+    pub udp_port: u16,
+    pub led_count: usize,
+    #[serde(default)]
+    pub start_corner: crate::output::perimeter::StartCorner,
+    #[serde(default)]
+    pub reverse_direction: bool,
+    #[serde(default)]
+    pub perimeter_offset: usize,
+    #[serde(default = "default_output_trim")]
+    pub brightness_trim: f32,
+}
+fn default_wled_port() -> u16 {
+    crate::output::wled::DEFAULT_PORT
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Automatically pause/resume outputs with the TV's active/standby state.
@@ -180,6 +203,18 @@ pub struct Config {
     /// Runtime preference: stop sending Nanoleaf UDP frames when off.
     #[serde(default = "default_true")]
     pub nanoleaf_sync_enabled: bool,
+    /// Default output for a fresh installation; existing configurations
+    /// without this field retain their original Hue/Nanoleaf settings.
+    #[serde(default = "default_true")]
+    pub wled_sync_enabled: bool,
+    #[serde(default)]
+    pub wled_devices: Vec<WledConfig>,
+    /// Auto prefers LG histogram for detected secure video, frame capture otherwise.
+    #[serde(default)]
+    pub capture_mode: crate::capture::drm_routing::CaptureMode,
+    /// Histogram spatial calibration; unknown TVs use uniform average by default.
+    #[serde(default)]
+    pub histogram: crate::capture::histogram::HistogramSettings,
     #[serde(default = "default_fps")]
     pub fps: u32,
     #[serde(default = "default_brightness")]
@@ -344,14 +379,35 @@ impl Config {
                 reason: "capture dimensions must fit within 4096 per side and 4K pixels",
             });
         }
+        if !self.histogram.validate() {
+            return Err(ConfigError::Invalid {
+                path: path.to_path_buf(),
+                reason: "invalid histogram calibration points/profile",
+            });
+        }
+        for device in &self.wled_devices {
+            if device.enabled
+                && (device.ip.trim().is_empty()
+                    || device.udp_port == 0
+                    || device.led_count == 0
+                    || device.led_count > 65536
+                    || !device.brightness_trim.is_finite()
+                    || !(0.0..=4.0).contains(&device.brightness_trim))
+            {
+                return Err(ConfigError::Invalid {
+                    path: path.to_path_buf(),
+                    reason: "invalid WLED destination/LED count/brightness trim",
+                });
+            }
+        }
         Ok(())
     }
 
     pub fn new_default(bridge_ip: &str, username: &str, clientkey: &str, area_id: &str) -> Self {
         Self {
             auto_tv_power: true,
-            hue_enabled: true,
-            hue_sync_enabled: true,
+            hue_enabled: false,
+            hue_sync_enabled: false,
             bridge_ip: bridge_ip.to_string(),
             username: username.to_string(),
             clientkey: clientkey.to_string(),
@@ -360,6 +416,10 @@ impl Config {
             entertainment_configuration_id: None,
             nanoleaf: None,
             nanoleaf_sync_enabled: true,
+            wled_sync_enabled: true,
+            wled_devices: Vec::new(),
+            capture_mode: crate::capture::drm_routing::CaptureMode::AutoDrmFirst,
+            histogram: crate::capture::histogram::HistogramSettings::default(),
             fps: default_fps(),
             brightness_multiplier: default_brightness(),
             hue_output_brightness: default_output_trim(),
