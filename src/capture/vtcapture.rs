@@ -633,37 +633,35 @@ impl VtCapture {
         if self.is_stopped || self.driver.is_null() {
             return;
         }
-        unsafe {
-            let client_ptr = self.client_id.as_ptr() as *const c_char;
-            for result in [
-                frame_native!(
-                    lg_frame_guard_stop,
-                    "stop",
-                    self.fn_stop,
-                    self.driver,
-                    client_ptr
-                ),
-                frame_native!(
-                    lg_frame_guard_postprocess,
-                    "postprocess",
-                    self.fn_postprocess,
-                    self.driver,
-                    client_ptr
-                ),
-                frame_native!(
-                    lg_frame_guard_finalize,
-                    "finalize",
-                    self.fn_finalize,
-                    self.driver,
-                    client_ptr
-                ),
-            ] {
-                if let Err(error) = result {
-                    warn!("LG capture cleanup: {error:#}");
-                }
+        let client_ptr = self.client_id.as_ptr() as *const c_char;
+        for result in [
+            frame_native!(
+                lg_frame_guard_stop,
+                "stop",
+                self.fn_stop,
+                self.driver,
+                client_ptr
+            ),
+            frame_native!(
+                lg_frame_guard_postprocess,
+                "postprocess",
+                self.fn_postprocess,
+                self.driver,
+                client_ptr
+            ),
+            frame_native!(
+                lg_frame_guard_finalize,
+                "finalize",
+                self.fn_finalize,
+                self.driver,
+                client_ptr
+            ),
+        ] {
+            if let Err(error) = result {
+                warn!("LG capture cleanup: {error:#}");
             }
-            self.is_stopped = true;
         }
+        self.is_stopped = true;
         info!("[-] Released vtCapture hardware scaler channel.");
     }
 }
@@ -884,40 +882,38 @@ impl ScreenCapture for VtCapture {
 
 impl Drop for VtCapture {
     fn drop(&mut self) {
-        unsafe {
-            if !self.driver.is_null() {
-                let client_ptr = self.client_id.as_ptr() as *const c_char;
-                if !self.is_stopped {
-                    let _ = frame_native!(
-                        lg_frame_guard_stop,
-                        "stop",
-                        self.fn_stop,
-                        self.driver,
-                        client_ptr
-                    );
-                    let _ = frame_native!(
-                        lg_frame_guard_postprocess,
-                        "postprocess",
-                        self.fn_postprocess,
-                        self.driver,
-                        client_ptr
-                    );
-                    let _ = frame_native!(
-                        lg_frame_guard_finalize,
-                        "finalize",
-                        self.fn_finalize,
-                        self.driver,
-                        client_ptr
-                    );
-                }
+        if !self.driver.is_null() {
+            let client_ptr = self.client_id.as_ptr() as *const c_char;
+            if !self.is_stopped {
                 let _ = frame_native!(
-                    lg_frame_guard_release,
-                    "release",
-                    self.fn_release,
-                    self.driver
+                    lg_frame_guard_stop,
+                    "stop",
+                    self.fn_stop,
+                    self.driver,
+                    client_ptr
                 );
-                self.driver = std::ptr::null_mut();
+                let _ = frame_native!(
+                    lg_frame_guard_postprocess,
+                    "postprocess",
+                    self.fn_postprocess,
+                    self.driver,
+                    client_ptr
+                );
+                let _ = frame_native!(
+                    lg_frame_guard_finalize,
+                    "finalize",
+                    self.fn_finalize,
+                    self.driver,
+                    client_ptr
+                );
             }
+            let _ = frame_native!(
+                lg_frame_guard_release,
+                "release",
+                self.fn_release,
+                self.driver
+            );
+            self.driver = std::ptr::null_mut();
         }
     }
 }
