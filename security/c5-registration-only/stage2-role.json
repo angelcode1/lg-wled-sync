@@ -1,0 +1,20 @@
+{
+  "exeName": "/var/home/root/c5-histogram-probe",
+  "type": "regular",
+  "allowedNames": [
+    "com.webos.rm.client.*",
+    "com.webos.service.capture.client*"
+  ],
+  "permissions": [
+    {
+      "service": "com.webos.rm.client.*",
+      "outbound": [
+        "com.webos.media"
+      ]
+    },
+    {
+      "service": "com.webos.service.capture.client*",
+      "outbound": []
+    }
+  ]
+}
