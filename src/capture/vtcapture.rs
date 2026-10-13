@@ -350,13 +350,7 @@ impl C5MetadataSession {
         // A failed/throwing process may have partially started capture.
         // Attempt stop before postprocess in that case; never read buffers.
         if self.process_attempted {
-            match frame_native!(
-                lg_frame_guard_stop,
-                "stop",
-                self.stop,
-                self.driver,
-                client
-            ) {
+            match frame_native!(lg_frame_guard_stop, "stop", self.stop, self.driver, client) {
                 Ok(0) => {}
                 Ok(code) => issues.push(format!("stop returned {code}")),
                 Err(error) => issues.push(format!("stop guard: {error:#}")),
