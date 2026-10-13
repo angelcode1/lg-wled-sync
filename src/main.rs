@@ -88,6 +88,12 @@ enum Commands {
         #[arg(long, default_value_t = 600)]
         interval_ms: u64,
     },
+    /// One native frame initialization/cleanup check (no streaming, no pixel reads)
+    TestFrameInit {
+        /// Acknowledge temporary LG native VT/Resource Manager acquisition
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+    },
     /// Register/unregister a temporary private LS2 name without loading the VT capture driver
     TestLs2Registration {
         /// Explicitly acknowledge an active Luna bus registration attempt
@@ -142,6 +148,9 @@ async fn main() -> Result<()> {
             samples,
             interval_ms,
         } => run_test_histogram(acknowledge_native_capture, samples, interval_ms).await,
+        Commands::TestFrameInit {
+            acknowledge_native_capture,
+        } => run_test_frame_init(acknowledge_native_capture).await,
         Commands::TestLs2Registration {
             acknowledge_luna_registration,
             capture_client,
@@ -2079,6 +2088,57 @@ async fn run_test_histogram(
         warn!("No measurable regional change; scene may be static or histogram input unavailable");
     }
     Ok(())
+}
+
+/// One-time opt-in test: validate three spaced, fresh media classifications
+/// before entering LG's native create/init/finalize/release path. No capture
+/// property selection, stream setup, output delivery, or buffer access.
+async fn run_test_frame_init(acknowledge_native_capture: bool) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "test-frame-init requires --acknowledge-native-capture; native init may acquire exclusive LG VT resources"
+        ));
+    }
+    for sample in 1..=3 {
+        let class = capture::media::query().await;
+        if class != PlaybackClass::Clear {
+            return Err(anyhow!(
+                "FRAME_INIT_REFUSED: media sample {sample}/3 is {class:?}; only positively identified Clear content is permitted"
+            ));
+        }
+        if sample < 3 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    info!("FRAME_INIT_CLEAR_GATE_PASS: 3/3 spaced Clear classifications");
+    VtCapture::probe_init_only()
+}
+
+#[cfg(test)]
+mod c5_frame_init_cli_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn missing_acknowledgement_rejects_before_media_or_native_access() {
+        let error = run_test_frame_init(false).await.expect_err("must refuse");
+        assert!(error.to_string().contains("--acknowledge-native-capture"));
+    }
+
+    #[test]
+    fn frame_init_command_requires_explicit_user_action() {
+        let parsed = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-frame-init",
+            "--acknowledge-native-capture",
+        ])
+        .expect("subcommand and acknowledgement parse");
+        assert!(matches!(
+            parsed.command,
+            Commands::TestFrameInit {
+                acknowledge_native_capture: true
+            }
+        ));
+    }
 }
 
 async fn run_test_capture(config_path: PathBuf, raw_nv12_stats: bool) -> Result<()> {
