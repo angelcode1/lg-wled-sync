@@ -93,6 +93,9 @@ enum Commands {
         /// Explicitly acknowledge an active Luna bus registration attempt
         #[arg(long)]
         acknowledge_luna_registration: bool,
+        /// Probe native VT's capture-client LSRegister name instead of Resource Manager
+        #[arg(long)]
+        capture_client: bool,
     },
     /// Discover and pair with a Philips Hue Bridge via pushlink button
     Pair {
@@ -141,7 +144,8 @@ async fn main() -> Result<()> {
         } => run_test_histogram(acknowledge_native_capture, samples, interval_ms).await,
         Commands::TestLs2Registration {
             acknowledge_luna_registration,
-        } => ls2_probe::run(acknowledge_luna_registration),
+            capture_client,
+        } => ls2_probe::run(acknowledge_luna_registration, capture_client),
         Commands::Pair { bridge, output } => run_pair(bridge, output).await,
         Commands::SyncHue { config, area } => run_sync_hue(config, area).await,
         Commands::PairNanoleaf { ip, config } => run_pair_nanoleaf(ip, config).await,
