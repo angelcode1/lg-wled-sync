@@ -305,6 +305,98 @@ fn central_nv12_stats(
 }
 
 impl VtCapture {
+    /// Bounded, explicit native *initialization-only* diagnostic.
+    ///
+    /// This may acquire LG Resource Manager / LS2 ownership temporarily, so
+    /// callers MUST verify the source is positively classified Clear first.
+    /// Never preprocess, select a capture mode, start a stream, request buffer
+    /// metadata, or read frame pixels. Respect all vendor permission refusals.
+    pub fn probe_init_only() -> Result<()> {
+        if !Path::new(LIBVTCAPTURE_PATH).exists() {
+            return Err(anyhow!("libvtcapture is absent"));
+        }
+        let lib = unsafe { Library::new(LIBVTCAPTURE_PATH) }
+            .context("failed to load native LG capture library for init-only probe")?;
+        let caller = CString::new("org.webosbrew.lg-hue-sync")?;
+        let mut client_id = [0u8; 128];
+        client_id[0] = b'0';
+        client_id[1] = b'0';
+
+        unsafe {
+            let create: Symbol<FnVtCaptureCreate> = lib.get(b"vtCapture_create\0")?;
+            let init: Symbol<FnVtCaptureInit> = lib.get(b"vtCapture_init\0")?;
+            let finalize: Symbol<FnVtCaptureFinalize> = lib.get(b"vtCapture_finalize\0")?;
+            let release: Symbol<FnVtCaptureRelease> = lib.get(b"vtCapture_release\0")?;
+
+            let driver = frame_create(*create)?;
+            if driver.is_null() {
+                return Err(anyhow!("vtCapture_create returned null"));
+            }
+
+            let init_result = frame_native!(
+                lg_frame_guard_init,
+                "init",
+                *init,
+                driver,
+                caller.as_ptr(),
+                client_id.as_mut_ptr() as *mut c_char
+            );
+
+            // Only an initialized client may be finalized. A denied or
+            // throwing init is released, never retried with another caller.
+            let finalize_result = if matches!(init_result, Ok(0)) {
+                Some(frame_native!(
+                    lg_frame_guard_finalize,
+                    "finalize",
+                    *finalize,
+                    driver,
+                    client_id.as_ptr() as *const c_char
+                ))
+            } else {
+                None
+            };
+
+            // Attempt release even if init/finalize returned an error.
+            let release_result =
+                frame_native!(lg_frame_guard_release, "release", *release, driver);
+
+            let init_code = init_result?;
+            if init_code != 0 {
+                if let Err(error) = release_result {
+                    warn!("Native release after init refusal: {error:#}");
+                }
+                return Err(NativeCaptureError {
+                    backend: "libvtcapture",
+                    operation: "vtCapture_init",
+                    code: init_code,
+                }
+                .into());
+            }
+
+            let final_code = finalize_result
+                .expect("finalize required after a successful init")?;
+            if final_code != 0 {
+                return Err(NativeCaptureError {
+                    backend: "libvtcapture",
+                    operation: "vtCapture_finalize",
+                    code: final_code,
+                }
+                .into());
+            }
+            let release_code = release_result?;
+            if release_code != 0 {
+                return Err(NativeCaptureError {
+                    backend: "libvtcapture",
+                    operation: "vtCapture_release",
+                    code: release_code,
+                }
+                .into());
+            }
+            info!("C5_FRAME_INIT_ONLY_PASS: initialized and released; no preprocess or frame read");
+            Ok(())
+        }
+    }
+
     pub fn enable_raw_stats(&mut self) {
         self.raw_stats_enabled = true;
     }
