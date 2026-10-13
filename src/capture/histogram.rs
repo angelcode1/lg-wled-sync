@@ -225,7 +225,19 @@ impl MarkerGuard {
                     events: libc::POLLIN | libc::POLLHUP,
                     revents: 0,
                 };
-                libc::poll(&mut waiter, 1, 10_000);
+                // Wait until the parent closes the write end or dies.
+                // A fixed timeout could delete vt_devmode during a slow
+                // native initialization while the owner was still alive.
+                loop {
+                    let result = libc::poll(&mut waiter, 1, -1);
+                    if result >= 0 {
+                        break;
+                    }
+                    if *libc::__errno_location() != libc::EINTR {
+                        libc::close(fds[0]);
+                        libc::_exit(1); // leave marker in place on unknown errors
+                    }
+                }
                 libc::close(fds[0]);
                 let mut found = std::mem::zeroed::<libc::stat>();
                 let mut ok = 1;
