@@ -369,7 +369,6 @@ fn validate_buffer_descriptor(
     })
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ReadableSpan {
     start: usize,
@@ -383,14 +382,14 @@ fn parse_readable_spans(maps: &str) -> Result<Vec<ReadableSpan>> {
     for line in maps.lines().filter(|line| !line.trim().is_empty()) {
         let mut fields = line.split_whitespace();
         let range = fields.next().ok_or_else(|| anyhow!("missing VMA range"))?;
-        let perms = fields.next().ok_or_else(|| anyhow!("missing VMA permissions"))?;
+        let perms = fields
+            .next()
+            .ok_or_else(|| anyhow!("missing VMA permissions"))?;
         let (start, end) = range
             .split_once('-')
             .ok_or_else(|| anyhow!("malformed VMA address range"))?;
-        let start = usize::from_str_radix(start, 16)
-            .context("invalid VMA starting address")?;
-        let end = usize::from_str_radix(end, 16)
-            .context("invalid VMA ending address")?;
+        let start = usize::from_str_radix(start, 16).context("invalid VMA starting address")?;
+        let end = usize::from_str_radix(end, 16).context("invalid VMA ending address")?;
         if start >= end {
             return Err(anyhow!("invalid VMA address ordering"));
         }
@@ -439,16 +438,24 @@ fn check_descriptor_readable_mappings(
     let spans = parse_readable_spans(maps)?;
     let y_addr = descriptor.start_addr0 as usize;
     let uv_addr = descriptor.start_addr1 as usize;
-    let y_end = y_addr.checked_add(summary.y_size).ok_or_else(|| anyhow!("Y range overflow"))?;
-    let uv_end = uv_addr.checked_add(summary.uv_size).ok_or_else(|| anyhow!("UV range overflow"))?;
+    let y_end = y_addr
+        .checked_add(summary.y_size)
+        .ok_or_else(|| anyhow!("Y range overflow"))?;
+    let uv_end = uv_addr
+        .checked_add(summary.uv_size)
+        .ok_or_else(|| anyhow!("UV range overflow"))?;
     if y_addr < uv_end && uv_addr < y_end {
         return Err(anyhow!("native Y and UV descriptor ranges overlap"));
     }
     if !span_is_readable(y_addr, summary.y_size, &spans) {
-        return Err(anyhow!("native Y descriptor is not fully covered by readable mappings"));
+        return Err(anyhow!(
+            "native Y descriptor is not fully covered by readable mappings"
+        ));
     }
     if !span_is_readable(uv_addr, summary.uv_size, &spans) {
-        return Err(anyhow!("native UV descriptor is not fully covered by readable mappings"));
+        return Err(anyhow!(
+            "native UV descriptor is not fully covered by readable mappings"
+        ));
     }
     Ok(())
 }
@@ -657,7 +664,9 @@ impl VtCapture {
         mapping_once: bool,
     ) -> Result<()> {
         if mapping_once && (!process_once || !descriptor_once) {
-            return Err(anyhow!("mapping-only probe requires a processed descriptor"));
+            return Err(anyhow!(
+                "mapping-only probe requires a processed descriptor"
+            ));
         }
         let lib = unsafe { Library::new(LIBVTCAPTURE_PATH) }
             .context("unable to load LG VT library for metadata-only probe")?;
@@ -1501,7 +1510,8 @@ mod tests {
             y_size: 0x1000,
             uv_size: 0x800,
         };
-        let maps = "00001000-00003000 rw-p 00000000 00:00 0\n00004000-00005000 r--p 00000000 00:00 0\n";
+        let maps =
+            "00001000-00003000 rw-p 00000000 00:00 0\n00004000-00005000 r--p 00000000 00:00 0\n";
         // Deliberately fake pointer values: no actual allocation exists.
         let mut descriptor = LibVtCaptureBufferInfo {
             start_addr0: 0x1800usize as *mut u8,
