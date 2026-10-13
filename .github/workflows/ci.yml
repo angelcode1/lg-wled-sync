@@ -55,6 +55,10 @@ jobs:
         run: python3 scripts/check_release.py
       - name: Verify C5 collector shell syntax
         run: bash -n scripts/c5_profile.sh
+      - name: Test C5 V4L2 sysfs inventory (offline only)
+        run: |
+          sh -n scripts/c5_v4l2_sysfs_inventory.sh
+          python3 -m unittest discover -s scripts -p test_c5_v4l2_sysfs_inventory.py -v
       - name: Test C5 profile importer (offline)
         run: python3 -m unittest discover -s scripts -p test_c5_profile_import.py -v
       - name: Validate C5 LS2 registration-only role (offline)
