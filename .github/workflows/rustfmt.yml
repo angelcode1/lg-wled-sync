@@ -8,14 +8,14 @@ permissions:
 
 jobs:
   rustfmt:
-    name: Apply rustfmt to DRM/WLED development branch
+    name: Apply rustfmt to main
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Check out the development branch
         uses: actions/checkout@v7
         with:
-          ref: feature/vendor-neutral-wled-drm-first
+          ref: main
           fetch-depth: 1
       - name: Install Rustfmt
         uses: dtolnay/rust-toolchain@stable
@@ -40,4 +40,4 @@ jobs:
           git diff --cached --check
           if git diff --cached --quiet; then exit 0; fi
           git commit -m 'style: apply rustfmt to shared color pipeline'
-          git push origin HEAD:refs/heads/feature/vendor-neutral-wled-drm-first
+          git push origin HEAD:refs/heads/main
