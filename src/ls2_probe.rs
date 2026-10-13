@@ -22,12 +22,22 @@ type ErrorInit = unsafe extern "C" fn(*mut LunaError) -> bool;
 type ErrorFree = unsafe extern "C" fn(*mut LunaError);
 type RegisterPubPriv =
     unsafe extern "C" fn(*const libc::c_char, *mut *mut libc::c_void, bool, *mut LunaError) -> bool;
+type RegisterPrivate =
+    unsafe extern "C" fn(*const libc::c_char, *mut *mut libc::c_void, *mut LunaError) -> bool;
 type Unregister = unsafe extern "C" fn(*mut libc::c_void, *mut LunaError) -> bool;
 
 const RM_NAME_PREFIX: &str = "com.webos.rm.client._lghuesyncprobe";
+const CAPTURE_NAME_PREFIX: &str = "com.webos.service.capture.client";
 
 fn registration_name(pid: u32) -> CString {
     CString::new(format!("{RM_NAME_PREFIX}{pid}")).expect("static LS2 prefix and decimal PID")
+}
+
+fn capture_client_name(pid: u32) -> CString {
+    // The C5 native library uses a decimal suffix in 0..10000.
+    // The PID supplies a deterministic, probe-only candidate without VT init.
+    CString::new(format!("{CAPTURE_NAME_PREFIX}{}", pid % 10_000))
+        .expect("static LS2 prefix and decimal PID suffix")
 }
 
 fn error_details(error: &LunaError) -> String {
@@ -48,12 +58,21 @@ fn error_details(error: &LunaError) -> String {
 /// This function deliberately does not load libvtcapture, libums_connector,
 /// or libresource_mgr_client; its outcome isolates LS2 registration from the
 /// VT native client construction. The caller must explicitly acknowledge.
-pub fn run(acknowledge: bool) -> Result<()> {
+pub fn run(acknowledge: bool, capture_client: bool) -> Result<()> {
     if !acknowledge {
         bail!("LS2 registration is an active bus operation; pass --acknowledge-luna-registration");
     }
 
-    let name = registration_name(std::process::id());
+    let name = if capture_client {
+        capture_client_name(std::process::id())
+    } else {
+        registration_name(std::process::id())
+    };
+    let kind = if capture_client {
+        "capture-client"
+    } else {
+        "resource-manager"
+    };
     let name_text = name.to_str().context("invalid LS2 registration name")?;
     let executable = std::fs::read_link("/proc/self/exe")
         .map(|p| p.display().to_string())
@@ -67,6 +86,7 @@ pub fn run(acknowledge: bool) -> Result<()> {
         let init: Symbol<'_, ErrorInit> = library.get(b"LSErrorInit\0")?;
         let free: Symbol<'_, ErrorFree> = library.get(b"LSErrorFree\0")?;
         let register: Symbol<'_, RegisterPubPriv> = library.get(b"LSRegisterPubPriv\0")?;
+        let register_private: Symbol<'_, RegisterPrivate> = library.get(b"LSRegister\0")?;
         let unregister: Symbol<'_, Unregister> = library.get(b"LSUnregister\0")?;
 
         // LSError contains only integers and nullable pointers; zero is its
@@ -78,9 +98,15 @@ pub fn run(acknowledge: bool) -> Result<()> {
 
         let mut handle: *mut libc::c_void = ptr::null_mut();
         println!(
-            "LS2_PROBE_ATTEMPT executable={executable} name={name_text} private_bus=true capture=false"
+            "LS2_PROBE_ATTEMPT kind={kind} executable={executable} name={name_text} private_bus=true capture=false"
         );
-        let registered = register(name.as_ptr(), &mut handle, false, &mut error);
+        // Native LG VT uses LSRegister for its capture-client name and
+        // Resource Manager uses LSRegisterPubPriv(..., public_bus=false).
+        let registered = if capture_client {
+            register_private(name.as_ptr(), &mut handle, &mut error)
+        } else {
+            register(name.as_ptr(), &mut handle, false, &mut error)
+        };
         if !registered {
             let detail = error_details(&error);
             free(&mut error);
@@ -125,8 +151,17 @@ mod tests {
     }
 
     #[test]
+    fn capture_client_name_uses_native_family_without_vt_initialization() {
+        assert_eq!(
+            capture_client_name(12345).to_str().unwrap(),
+            "com.webos.service.capture.client2345"
+        );
+    }
+
+    #[test]
     fn requires_explicit_acknowledgement_before_loading_luna() {
-        let message = run(false).unwrap_err().to_string();
+        let message = run(false, false).unwrap_err().to_string();
+        assert!(run(false, true).is_err());
         assert!(message.contains("--acknowledge-luna-registration"));
     }
 }
