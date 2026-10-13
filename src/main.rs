@@ -118,6 +118,12 @@ enum Commands {
         #[arg(long)]
         acknowledge_native_capture: bool,
     },
+    /// Read just three bytes through the Linux kernel; never dereference VT pointers
+    TestFrameKernelCopy {
+        /// Acknowledge one short-lived native pixel-buffer copy of exactly three bytes
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+    },
     /// Register/unregister a temporary private LS2 name without loading the VT capture driver
     TestLs2Registration {
         /// Explicitly acknowledge an active Luna bus registration attempt
@@ -187,6 +193,9 @@ async fn main() -> Result<()> {
         Commands::TestFrameMapping {
             acknowledge_native_capture,
         } => run_test_frame_mapping(acknowledge_native_capture).await,
+        Commands::TestFrameKernelCopy {
+            acknowledge_native_capture,
+        } => run_test_frame_kernel_copy(acknowledge_native_capture).await,
         Commands::TestLs2Registration {
             acknowledge_luna_registration,
             capture_client,
@@ -2380,6 +2389,58 @@ mod c5_frame_mapping_cli_tests {
         assert!(matches!(
             parsed.command,
             Commands::TestFrameMapping {
+                acknowledge_native_capture: true
+            }
+        ));
+    }
+}
+
+/// First content-read boundary. Three bytes only, using process_vm_readv
+/// against own readable mappings. The sample values are never logged or kept.
+async fn run_test_frame_kernel_copy(acknowledge_native_capture: bool) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "test-frame-kernel-copy requires --acknowledge-native-capture; performs a bounded native pixel read"
+        ));
+    }
+    for sample in 1..=3 {
+        let class = capture::media::query().await;
+        if class != PlaybackClass::Clear {
+            return Err(anyhow!(
+                "FRAME_KERNEL_COPY_REFUSED: media sample {sample}/3 is {class:?}; only independently verified Clear media"
+            ));
+        }
+        if sample < 3 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    info!("FRAME_KERNEL_COPY_CLEAR_GATE_PASS: 3/3 spaced Clear classifications");
+    VtCapture::probe_three_byte_kernel_copy_once()
+}
+
+#[cfg(test)]
+mod c5_frame_kernel_copy_cli_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn kernel_copy_requires_explicit_acknowledgement() {
+        let error = run_test_frame_kernel_copy(false)
+            .await
+            .expect_err("kernel copy needs opt in");
+        assert!(error.to_string().contains("--acknowledge-native-capture"));
+    }
+
+    #[test]
+    fn kernel_copy_is_distinct_from_unrestricted_capture() {
+        let parsed = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-frame-kernel-copy",
+            "--acknowledge-native-capture",
+        ])
+        .expect("parse bounded kernel copy");
+        assert!(matches!(
+            parsed.command,
+            Commands::TestFrameKernelCopy {
                 acknowledge_native_capture: true
             }
         ));

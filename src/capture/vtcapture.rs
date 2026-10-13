@@ -460,6 +460,105 @@ fn check_descriptor_readable_mappings(
     Ok(())
 }
 
+/// Select just one central Y sample and the corresponding 2-byte NV12
+/// chroma pair. Offset arithmetic is performed on integers, not pointers.
+fn checked_central_offsets(
+    layout: (u32, u32, u32),
+    summary: DescriptorSummary,
+) -> Result<(usize, usize)> {
+    let (width, height, stride) = layout;
+    if (width, height, stride) != (320, 180, 320) {
+        return Err(anyhow!("unexpected native frame geometry for 3-byte probe"));
+    }
+    let x = (width / 2) as usize;
+    let y = (height / 2) as usize;
+    let stride = stride as usize;
+    let y_offset = y
+        .checked_mul(stride)
+        .and_then(|v| v.checked_add(x))
+        .ok_or_else(|| anyhow!("Y sample offset overflow"))?;
+    let uv_offset = (y / 2)
+        .checked_mul(stride)
+        .and_then(|v| v.checked_add(x & !1))
+        .ok_or_else(|| anyhow!("UV sample offset overflow"))?;
+    if y_offset >= summary.y_size
+        || uv_offset.checked_add(2).is_none_or(|end| end > summary.uv_size)
+    {
+        return Err(anyhow!("3-byte probe sample outside reported plane bounds"));
+    }
+    Ok((y_offset, uv_offset))
+}
+
+/// Use the kernel copy API instead of dereferencing opaque vendor pointers.
+/// No fallback to /proc/self/mem, direct slices, memcpy or unsafe read.
+#[cfg(target_os = "linux")]
+fn copy_self_via_kernel(addr: usize, dest: &mut [u8]) -> Result<()> {
+    if addr == 0
+        || dest.is_empty()
+        || dest.len() > 2
+        || addr.checked_add(dest.len()).is_none()
+    {
+        return Err(anyhow!("invalid kernel-copy sample request"));
+    }
+    let local = libc::iovec {
+        iov_base: dest.as_mut_ptr().cast::<c_void>(),
+        iov_len: dest.len(),
+    };
+    // An opaque integer is handed to the kernel. It is never dereferenced
+    // by Rust or converted into a Rust reference.
+    let remote = libc::iovec {
+        iov_base: addr as *mut c_void,
+        iov_len: dest.len(),
+    };
+    let copied = unsafe {
+        libc::process_vm_readv(libc::getpid(), &local, 1, &remote, 1, 0)
+    };
+    if copied == dest.len() as isize {
+        Ok(())
+    } else {
+        dest.fill(0);
+        if copied < 0 {
+            Err(anyhow!(
+                "kernel-mediated self-copy refused: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            Err(anyhow!("kernel-mediated self-copy returned short read"))
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn copy_self_via_kernel(_addr: usize, _dest: &mut [u8]) -> Result<()> {
+    Err(anyhow!("kernel-mediated sample requires Linux"))
+}
+
+/// Exactly three ephemeral bytes: one Y and one U/V pair, sampled from a
+/// known-clear test source. Never log data, keep pixels, hash or send output.
+/// Cleanup of native VT remains with C5MetadataSession regardless of result.
+fn sample_three_bytes_kernel_only(
+    descriptor: &LibVtCaptureBufferInfo,
+    layout: (u32, u32, u32),
+    summary: DescriptorSummary,
+) -> Result<()> {
+    let (y_offset, uv_offset) = checked_central_offsets(layout, summary)?;
+    let y = (descriptor.start_addr0 as usize)
+        .checked_add(y_offset)
+        .ok_or_else(|| anyhow!("Y sample pointer arithmetic overflow"))?;
+    let uv = (descriptor.start_addr1 as usize)
+        .checked_add(uv_offset)
+        .ok_or_else(|| anyhow!("UV sample pointer arithmetic overflow"))?;
+    let mut y_byte = [0u8; 1];
+    let mut uv_bytes = [0u8; 2];
+    let copied = (|| -> Result<()> {
+        copy_self_via_kernel(y, &mut y_byte)?;
+        copy_self_via_kernel(uv, &mut uv_bytes)
+    })();
+    y_byte.fill(0);
+    uv_bytes.fill(0);
+    copied
+}
+
 /**
  * One-shot native probe owner. Once preprocess has been attempted, even a
  * native error may have partially armed the scaler: attempt postprocess before
@@ -636,37 +735,47 @@ impl VtCapture {
     /// requests, pixel reads, output devices, or mode fallbacks are permitted.
     /// Call only after three fresh, positively Clear media classifications.
     pub fn probe_preprocess_metadata() -> Result<()> {
-        Self::probe_preprocess_once(false, false, false)
+        Self::probe_preprocess_once(false, false, false, false)
     }
 
     /// One native process invocation on a known-clear display-output source.
     /// No buffer metadata requests or pixel reads. Process MAY enable a stream.
     pub fn probe_process_no_buffers() -> Result<()> {
-        Self::probe_preprocess_once(true, false, false)
+        Self::probe_preprocess_once(true, false, false, false)
     }
 
     /// Exactly one request for the native buffer *descriptor*, not its bytes.
     /// The returned pointers are treated as opaque: never logged, copied or
     /// dereferenced. The source must have been independently verified Clear.
     pub fn probe_buffer_descriptor_once() -> Result<()> {
-        Self::probe_preprocess_once(true, true, false)
+        Self::probe_preprocess_once(true, true, false, false)
     }
 
     /// Validate the Y and UV descriptor address ranges against readable VMAs
     /// while the native capture session is alive. No pixel loads or copies.
     pub fn probe_buffer_mappings_once() -> Result<()> {
-        Self::probe_preprocess_once(true, true, true)
+        Self::probe_preprocess_once(true, true, true, false)
+    }
+
+    /// First tightly bounded content access: three bytes copied by the
+    /// kernel from the two opaque planes, with no logging or persistence.
+    pub fn probe_three_byte_kernel_copy_once() -> Result<()> {
+        Self::probe_preprocess_once(true, true, true, true)
     }
 
     fn probe_preprocess_once(
         process_once: bool,
         descriptor_once: bool,
         mapping_once: bool,
+        sample_once: bool,
     ) -> Result<()> {
         if mapping_once && (!process_once || !descriptor_once) {
             return Err(anyhow!(
                 "mapping-only probe requires a processed descriptor"
             ));
+        }
+        if sample_once && !mapping_once {
+            return Err(anyhow!("bounded sample requires readable mapping validation"));
         }
         let lib = unsafe { Library::new(LIBVTCAPTURE_PATH) }
             .context("unable to load LG VT library for metadata-only probe")?;
@@ -830,6 +939,9 @@ impl VtCapture {
                             .context("cannot inspect own process VMA map")?;
                         check_descriptor_readable_mappings(&descriptor, validated, &maps)?;
                     }
+                    if sample_once {
+                        sample_three_bytes_kernel_only(&descriptor, layout, validated)?;
+                    }
                     Some(validated)
                 } else {
                     None
@@ -841,7 +953,12 @@ impl VtCapture {
             match (operation, cleanup) {
                 (Ok(((width, height, stride), summary)), Ok(())) => {
                     if let Some(summary) = summary {
-                        if mapping_once {
+                        if sample_once {
+                            info!(
+                                "C5_FRAME_KERNEL_COPY_PASS: display-output plane={}x{} stride={} sample_bytes=3 kernel_copy_calls=2 native_pointer_dereferences=0 pixel_values_logged=0 clean_shutdown=true",
+                                width, height, stride
+                            );
+                        } else if mapping_once {
                             info!(
                                 "C5_FRAME_MAPPING_PASS: display-output plane={}x{} stride={} y_size={} uv_size={} y_vma_readable=true uv_vma_readable=true descriptor_calls=1 frame_reads=0 clean_shutdown=true",
                                 width, height, stride, summary.y_size, summary.uv_size
@@ -1487,6 +1604,48 @@ impl Drop for VtCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_three_byte_offsets_are_centered_and_reject_short_planes() {
+        let summary = DescriptorSummary {
+            y_present: true,
+            uv_present: true,
+            y_size: 57600,
+            uv_size: 28800,
+        };
+        assert_eq!(
+            checked_central_offsets((320, 180, 320), summary).unwrap(),
+            (28960, 14560)
+        );
+        assert!(checked_central_offsets((320, 180, 321), summary).is_err());
+        assert!(checked_central_offsets((640, 360, 640), summary).is_err());
+        assert!(checked_central_offsets(
+            (320, 180, 320),
+            DescriptorSummary {
+                y_size: 28960,
+                ..summary
+            }
+        )
+        .is_err());
+        assert!(checked_central_offsets(
+            (320, 180, 320),
+            DescriptorSummary {
+                uv_size: 14561,
+                ..summary
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn kernel_copy_refuses_invalid_requests_before_any_syscall() {
+        let mut one = [0u8; 1];
+        assert!(copy_self_via_kernel(0, &mut one).is_err());
+        assert!(copy_self_via_kernel(usize::MAX, &mut one).is_err());
+        let mut three = [0u8; 3];
+        assert!(copy_self_via_kernel(1, &mut three).is_err());
+        assert!(copy_self_via_kernel(1, &mut []).is_err());
+    }
 
     #[test]
     fn readable_maps_cover_only_contiguous_readable_intervals() {
