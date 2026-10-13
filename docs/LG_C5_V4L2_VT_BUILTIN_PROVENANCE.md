@@ -73,3 +73,125 @@ vendor ELF. The C5 raw-pixel path stays fingerprint-blocked until a
 supported, authorization-preserving buffer ownership mechanism is
 established. Only independently verified Clear media can ever pass
 the existing active-capture gate.
+
+## Second live read-only provenance result: actual kernel symbol inventory
+
+User ran `scripts/c5_v4l2_builtin_provenance.sh` on
+2026-10-13. It completed with zero device opens, zero ioctls,
+zero pixel reads and zero kernel mutations.
+
+- `kernel=5.4.268-324`, `architecture=aarch64`
+- bound `/sys/bus/platform/drivers/v4l2_vt` exists
+- `/sys/bus/platform/devices/v4l2_vt` points to
+  `../../../devices/platform/v4l2_vt`
+- neither `/sys/bus/platform/drivers/v4l2_vt/module` nor
+  `/sys/module/v4l2_vt` exists
+- `/sys/bus/platform/devices/v4l2_vt/of_node` absent
+- `KERNEL_CONFIG_NOT_EXPOSED` — no readable kernel
+  configuration was found by the collector
+- `/proc/kallsyms` **exposes named driver functions**; no kernel
+  addresses were logged or retained
+
+Strong combined evidence: `v4l2_vt` is built into this
+kernel rather than loaded as a `.ko`. This is a live symbol-level
+attribution, **not yet a matching-source identification**.
+
+### Captured function names, grouped by engineering question
+
+| Domain | Observed kernel symbol names | Engineering relevance |
+|---|---|---|
+| Registration/lifecycle | `v4l2_vt_register`, `v4l2_vt_probe`, `v4l2_vt_remove`, `v4l2_vt_fh_open`, `v4l2_vt_fh_release` | Built-in platform driver and file-handle lifecycle |
+| Power | `v4l2_vt_resume`, `v4l2_vt_suspend`, `v4l2_vt_runtime_resume`, `v4l2_vt_runtime_suspend`, `v4l2_vt_pm_runtime_test` | Power domain state may affect capture readiness |
+| Format | `v4l2_vt_vidioc_g_fmt_vid_cap`, `v4l2_vt_vidioc_g_fmt_vid_cap_mplane`, `v4l2_vt_vidioc_s_fmt_vid_cap`, `v4l2_vt_vidioc_s_fmt_vid_cap_mplane` | Both single- and multi-planar handler *symbols* exist; only multi-planar G_FMT/S_FMT were demonstrated on this video node |
+| Queue and readiness | `v4l2_vt_vidioc_reqbufs`, `v4l2_vt_vidioc_dqbuf`, `v4l2_vt_poll`, `v4l2_vt_vidioc_expbuf` | Buffer allocation/dequeue, readiness, and potential DMABUF export path. **Export does not grant consumer ownership** |
+| Controls | `v4l2_vt_vidioc_querycap`, `v4l2_vt_vidioc_g_ctrl`, `v4l2_vt_vidioc_s_ctrl`, `v4l2_vt_vidioc_g_ext_ctrls`, `v4l2_vt_vidioc_s_ext_ctrls` | Confirms the vendor-specific control IDs seen on video60 are handled by the built-in driver |
+| Events | `v4l2_vt_vidioc_subscribe_event`, `v4l2_vt_vidioc_unsubscribe_event` | Event subscription functionality exists in code, exact event ABI unknown |
+| Capture worker | `vt_capture_thread`, `vt_capture_notification` | A **kernel-side** capture worker and notification function exist, separate from LG library's **userspace** DQBUF/publish/QBUF worker |
+
+**Presence in `kallsyms` does not guarantee an operation is
+registered in the device's `v4l2_ioctl_ops` table.** The earlier
+independently observed success of a correctly sized ARM32
+`VIDIOC_G_FMT=0xC0CC5604` proves that the multi-planar G_FMT
+entry point can be reached, but returned all-zero *idle* geometry.
+`VIDIOC_ENUM_FMT` returned ENOTTY at index zero because the
+driver registered no enum-format operation. The V4L2 core
+adds `EXT_PIX_FORMAT` to QUERYCAP; it does not originate in
+this LG driver.
+
+The `v4l2_vt_vidioc_expbuf` **symbol is a new offline
+investigation lead, not confirmation of a usable DMABUF FD**:
+the ioctl may be unregistered for this node, may require its
+own queue, and an exported DMA buffer by itself does not suspend
+kernel capture writes or prevent the userspace thread from
+immediately requeueing a buffer. No EXPBUF or buffer-access probe
+is authorized by this result.
+
+An older, **different-model** webOS 8.3 / C3 community log
+contains `vt_capture_thread` and `v4l2_vt_vidioc_reqbufs`
+kernel trace lines, including a five-buffer queue-setup result
+and a kernel-side "Index ... locked" message. This is useful
+historical context, **not** evidence that the C5 implements
+the same locking or cache synchronization:
+https://vuplus-support.org/wbb4/index.php?thread/146826-ambilight-f%C3%BCr-lg-smart-tv-mit-webos-piccap-hyperion-keine-extra-kosten-nur-tv-un/&pageNo=94
+
+### Remaining unanswered questions; static source review only
+
+1. Inspect `v4l2_vt_vidioc_reqbufs`, `v4l2_vt_vidioc_dqbuf`,
+   and `vt_capture_thread` for index ownership, queue minimum,
+   locking, DMA completion, cache invalidation and conditions
+   for releasing buffers.
+2. Inspect `v4l2_vt_vidioc_expbuf` and the registered
+   `v4l2_ioctl_ops` table to determine whether the code
+   supports export, under what conditions, and with what
+   lifetime semantics. **Do not try exporting or mapping until
+   those are established.**
+3. Audit `vt_capture_notification` for whether it signals
+   completion to userspace or is merely a driver-internal
+   notification; no consumer callback contract is known.
+4. Compare any lawfully obtained LG C5 kernel sources with
+   `5.4.268-324`, the platform name `v4l2_vt`, and the
+   symbol inventory before drawing conclusions. **The
+   vanilla upstream Linux 5.4.268 tree is not a substitute
+   for LG's vendor-modified kernel.**
+
+Public source route: LG's official
+[product downloads](https://opensource.lge.com/product)
+and [source inquiry](https://opensource.lge.com/inquiry).
+Exact model `OLED42C5PSA.AAUQLJD`, platform
+`v4l2_vt`, Linux `5.4.268-324`. No verified matching
+vendor source archive was found through public searches.
+The TV's board/SoC identifier and firmware software version
+would help match a model-specific LG source package.
+
+### Next non-invasive source-identification step
+
+Read only the board family / SoC identity, without serial
+numbers, MACs, unique device IDs, kernel pointers or changes:
+
+```sh
+ssh -T root@192.168.8.184 'sh -s' <<'TV'
+set -eu
+echo "===== LG C5 SOURCE MATCH IDENTITY ====="
+uname -r
+if command -v nyx-cmd >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    timeout 6 nyx-cmd DeviceInfo query device_name || true
+else
+    echo "NYX_DEVICE_NAME_UNAVAILABLE"
+fi
+if [ -r /proc/device-tree/compatible ]; then
+    echo "===== DEVICE TREE COMPATIBLE ====="
+    tr '\000' '\n' < /proc/device-tree/compatible
+else
+    echo "DEVICE_TREE_COMPATIBLE_UNAVAILABLE"
+fi
+if [ -r /sys/devices/soc0/soc_id ]; then
+    echo "===== SOC ID ====="
+    cat /sys/devices/soc0/soc_id
+fi
+echo "C5_SOURCE_MATCH_IDENTITY_COMPLETE"
+TV
+```
+
+Continue avoiding driver state changes, new V4L2 ownership,
+direct PFNMMAP reads, `/dev/forcecapture`, developer marker
+changes, or any protected/Unknown content.
