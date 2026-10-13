@@ -231,7 +231,7 @@ impl VtCapture {
                 fn_release(driver);
                 if ret_init == 11 {
                     error!(
-                        "[-] vtCapture_init returned error 11 (EAGAIN/EBUSY): /dev/video* hardware scaler is busy! Another capture process (e.g. lg-hue-sync.service, PicCap) is already running. Stop it with: systemctl stop lg-hue-sync"
+                        "[-] vtCapture_init returned native status 11 (Resource Manager acquisition failed in the audited C5 ELF); not necessarily errno EBUSY"
                     );
                 }
                 return Err(NativeCaptureError {
@@ -255,51 +255,48 @@ impl VtCapture {
                 client_str
             );
 
-            // 3. Preprocess properties (try DISPLAY_OUTPUT=2 first, then SCALER_INPUT=0, then SCALER_OUTPUT=1)
-            // DISPLAY_OUTPUT taps the composited display output and does not lock the raw HDMI input clock during mode switches.
-            let mut preprocessed = false;
-            let mut last_code = -1;
+            // 3. Use one audited capture mode only. Do not switch source
+            // modes after a native refusal (which may be a policy denial).
             let client_ptr = client_id.as_ptr() as *const c_char;
-
-            for dump_mode in [2, 0, 1] {
-                let props = LibVtCaptureProperties {
-                    dump: dump_mode,
-                    loc_x: 0,
-                    loc_y: 0,
-                    reg_w: target_width as i16,
-                    reg_h: target_height as i16,
-                    buf_cnt: 3,
-                    frm: 60,
-                };
-                let ret_pre = fn_preprocess(driver, client_ptr, &props);
-                if ret_pre == 0 {
-                    info!(
-                        "[+] vtCapture_preprocess succeeded (dump_mode: {}, resolution: {}x{})",
-                        dump_mode, target_width, target_height
-                    );
-                    preprocessed = true;
-                    break;
-                }
-                last_code = ret_pre;
-            }
-
-            if !preprocessed {
+            let props = LibVtCaptureProperties {
+                dump: 2, // DISPLAY_OUTPUT; C5 hardware support still unverified.
+                loc_x: 0,
+                loc_y: 0,
+                reg_w: target_width as i16,
+                reg_h: target_height as i16,
+                buf_cnt: 3,
+                frm: 60,
+            };
+            let ret_pre = fn_preprocess(driver, client_ptr, &props);
+            if ret_pre != 0 {
                 fn_finalize(driver, client_ptr);
                 fn_release(driver);
-                return Err(anyhow!(
-                    "vtCapture_preprocess failed across all dump modes (last code: {})",
-                    last_code
-                ));
+                return Err(NativeCaptureError {
+                    backend: "libvtcapture",
+                    operation: "vtCapture_preprocess",
+                    code: ret_pre,
+                }.into());
             }
+            info!("vtCapture_preprocess completed for selected display-output mode");
 
             // 4. Query plane layout and hardware stride
             let mut plane_info = LibVtCapturePlaneInfo::default();
             let ret_plane = fn_plane_info(driver, client_ptr, &mut plane_info);
             if ret_plane != 0 {
-                warn!(
-                    "vtCapture_planeInfo returned code {}, using target width as stride",
-                    ret_plane
-                );
+                fn_finalize(driver, client_ptr);
+                fn_release(driver);
+                return Err(NativeCaptureError {
+                    backend: "libvtcapture",
+                    operation: "vtCapture_planeInfo",
+                    code: ret_plane,
+                }.into());
+            }
+            if plane_info.plane_w <= 0 || plane_info.plane_h <= 0
+                || plane_info.stride <= 0 || plane_info.stride < plane_info.plane_w as c_int
+            {
+                fn_finalize(driver, client_ptr);
+                fn_release(driver);
+                return Err(anyhow!("vtCapture_planeInfo returned invalid dimensions/stride"));
             }
 
             // Honor actual hardware-configured plane dimensions if reported, otherwise fallback to target
@@ -350,7 +347,7 @@ impl VtCapture {
                 return Err(anyhow!("vtCapture_process failed with code {}", ret_proc));
             }
 
-            info!("[+] vtCapture_process stream started successfully");
+            info!("[+] vtCapture_process accepted the existing client ID (stream setup is part of preprocess)");
 
             Ok(Self {
                 driver,
