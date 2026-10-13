@@ -13,7 +13,7 @@ G_EXT_CTRLS(0x982a01,0x982a02) → QUERYBUF(0..2) →
 6×mmap → G_CTRL(0x982a07=60) → S_CTRL(0x982a08=2) →
 STREAMON → STREAMOFF → REQBUFS(0) → release`.
 
-The 320×180, 3-plane-buffer arrangement is *not* proof that a
+The 320×180, three two-plane-buffer arrangement is *not* proof that a
 consumer holds buffer ownership. LG's capture worker immediately
 requeues each dequeued index.
 

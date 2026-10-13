@@ -39,7 +39,7 @@ does not show custom, nonstandard ioctl command numbers.
 | 1 | open `/dev/video60` | `v4l2_open` succeeds; node belongs to platform `v4l2_vt` |
 | 2 | `VIDIOC_QUERYCAP` | `driver=o22`, `card=vt`, `version=0x000504ff`, `device_caps=0x04201000` |
 | 3 | `VIDIOC_G_EXT_CTRLS` | user-class ID `0x00982a00`, payload **40 bytes** |
-| 4 | `VIDIOC_S_FMT` | `VIDEO_CAPTURE_MPLANE`, requested **320×180**, `pixelformat=0`, `num_planes=0` *in logged request* |
+| 4 | `VIDIOC_S_FMT` | `VIDEO_CAPTURE_MPLANE`, requested **320×180**, `pixelformat=0`, `num_planes=0` *in the post-ioctl debug snapshot* |
 | 5 | `VIDIOC_S_EXT_CTRLS` | ID `0x00982a03`, payload **16 bytes** |
 | 6 | `VIDIOC_G_EXT_CTRLS` | ID `0x00982a03`, payload **16 bytes** |
 | 7 | `VIDIOC_REQBUFS` | `count=5`, `VIDEO_CAPTURE_MPLANE`, `V4L2_MEMORY_MMAP` |
@@ -80,8 +80,11 @@ deliberately suppresses `VIDIOC_QBUF`, `VIDIOC_DQBUF` and
 already shows a dequeue → publish index → immediate requeue worker
 sequence. A descriptor is not a frame lease.
 
-**Format caution:** `S_FMT` logs the request's zero FourCC/plane
-count; it does not prove that the negotiated output format is zero.
+**Format caution:** `S_FMT` logs a zero FourCC/plane count in the kernel's **post-ioctl**
+argument snapshot. This suggests the driver did not populate a
+standard V4L2 pixel format; the native output plane dimensions are
+supplied separately through LG's extended controls. It does not prove
+that the produced native NV12 buffers have zero dimensions.
 Independent `G_FMT` on the *idle* node returned success with
 `width=height=0`, `num_planes=0`. These values do not constitute
 a valid video format. Prefer the already working vendor
