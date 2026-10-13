@@ -650,8 +650,12 @@ mod tests {
         let mut r = NativeHistogram::default();
         r.bins[0][254] = 65535;
         r.bins[0][255] = 1;
-        let count = 65536u64;
-        let weighted = 254u64 * 65535 + 255;
+        let count: u64 = r.bins[0].iter().map(|&population| u64::from(population)).sum();
+        let weighted: u64 = r.bins[0]
+            .iter()
+            .enumerate()
+            .map(|(value, &population)| value as u64 * u64::from(population))
+            .sum();
         assert_eq!((weighted + count / 2) / count, 254);
     }
     #[test]
