@@ -1,7 +1,6 @@
 # LG C5: registration-only Luna diagnostic (no capture)
 
-Status: **code and role fixture staged in Git; NOT installed or run on the TV**.
-The native histogram has not produced a sample. HDMI HDCP is still `Unknown`.
+Status: **registration-only command successfully built and executed on the owner's C5 without an added role**. The TV explicitly rejected registration with `LSError -1027` (see below). The minimal role fixture is still **NOT installed**. The native histogram has not produced a sample. HDMI HDCP remains `Unknown`.
 
 ## Purpose and provenance
 
@@ -61,6 +60,130 @@ python3 -m json.tool security/c5-registration-only/manifest.json >/dev/null
 
 The CI test checks the exact executable, registered name family,
 outbound destination and absence of broad grants.
+
+## 2026-10-13: actual C5 registration-only baseline result (verified)
+
+The owner downloaded the CI-tested ARMv7 build from run
+`38334251772` (Rust tests/Clippy and ARMv7/glibc 2.28 jobs both
+**passed**) and installed it at the exact role candidate path,
+`/var/home/root/c5-histogram-probe`, after backing up the
+previous binary to `c5-histogram-probe.pre-ls2`.
+No security role was added. The on-TV output was:
+
+```text
+LS2_PROBE_ATTEMPT executable=/var/home/root/c5-histogram-probe name=com.webos.rm.client._lghuesyncprobe19292 private_bus=true capture=false
+Error: LS2_PROBE_REJECTED name=com.webos.rm.client._lghuesyncprobe19292 code=-1027 message=Invalid permissions for com.webos.rm.client._lghuesyncprobe19292
+```
+
+This **directly establishes rejection of a generated Resource Manager
+LS2 private-bus name by the current C5 hub policy** for this binary.
+Unlike the previous `LSRegisterPubPriv FAILED` C++ exception, we now
+have the LS2 rejection code and named caller. It is strong evidence
+for the missing application-specific registration role, but the hub
+message alone does not reveal every policy evaluation stage.
+
+The registration-only test did not load VT or touch
+`vt_devmode`. Do **not** rerun `test-histogram` or grant
+capture ACG groups on the basis of this result.
+
+### Controlled role installation experiment — owner must run explicitly
+
+The two reviewed fixture files are
+`security/c5-registration-only/{role,manifest}.json`; their content
+was checked by CI. The following installs only these two diagnostic
+files into the already-observed **development** LS2 directories, not
+the stock `/usr/share` policy directories. This **changes the TV's
+LS2 authorisation**, so review the contents before running it. Do
+not use `scripts/provision_luna.sh`.
+
+Get the known-good fixture revision (the exact tested commit, not a
+moving branch) into a local directory:
+
+```bash
+mkdir -p ~/Downloads/c5-ls2-role-test
+BASE=https://raw.githubusercontent.com/angelcode1/lg-wled-sync/53cd388d2bacda17b1d02314621d8f23b8fd1938/security/c5-registration-only
+curl -fL "$BASE/role.json" -o ~/Downloads/c5-ls2-role-test/role.json
+curl -fL "$BASE/manifest.json" -o ~/Downloads/c5-ls2-role-test/manifest.json
+python3 -m json.tool ~/Downloads/c5-ls2-role-test/role.json
+python3 -m json.tool ~/Downloads/c5-ls2-role-test/manifest.json
+```
+
+The only registration allowlist entry must be
+`com.webos.rm.client.*`, exact executable
+`/var/home/root/c5-histogram-probe`, type `regular`,
+and Resource Manager outbound destination `com.webos.media`.
+There is no `"all"` grant, capture role, wildcard outbound or
+client permission file.
+
+Stage files in the root user's private home; the `scp` does **not**
+put them into a policy directory:
+
+```bash
+ssh root@192.168.8.184 'mkdir -p /var/home/root/c5-ls2-role-stage && chmod 700 /var/home/root/c5-ls2-role-stage'
+scp -O ~/Downloads/c5-ls2-role-test/role.json ~/Downloads/c5-ls2-role-test/manifest.json \
+  root@192.168.8.184:/var/home/root/c5-ls2-role-stage/
+```
+
+Owner-controlled apply-and-retake-baseline; **abort if files already
+exist** (avoid clobbering unrelated roles). Do not reboot or restart
+`ls-hubd`.
+
+```bash
+ssh root@192.168.8.184 'sh -s' <<'TV'
+set -eu
+R=/var/luna-service2-dev/roles.d/org.webosbrew.lg-hue-sync.c5-rm-probe.role.json
+M=/var/luna-service2-dev/manifests.d/org.webosbrew.lg-hue-sync.c5-rm-probe.manifest.json
+S=/var/home/root/c5-ls2-role-stage
+BIN=/var/home/root/c5-histogram-probe
+
+test -f "$BIN" && test -x "$BIN"
+test ! -e "$R" && test ! -L "$R"
+test ! -e "$M" && test ! -L "$M"
+test -d /var/luna-service2-dev/roles.d
+test -d /var/luna-service2-dev/manifests.d
+test -s "$S/role.json" && test -s "$S/manifest.json"
+test ! -e /var/luna/preferences/vt_devmode
+
+umask 022
+cp "$S/role.json" "$R"
+cp "$S/manifest.json" "$M"
+chmod 644 "$R" "$M"
+cmp "$S/role.json" "$R"
+cmp "$S/manifest.json" "$M"
+
+echo '===== Trigger LS2 service/policy rescan ====='
+ls-control scan-services
+echo '===== Repeat registration-only probe ====='
+"$BIN" test-ls2-registration --acknowledge-luna-registration
+TV
+```
+
+`ls-control scan-services` is the documented mechanism for loading
+installed LS2 policies, though its behaviour for *manually copied*
+files may differ by OEM/build. If the new test still reports `-1027`,
+**do not broaden permissions**: inspect the scanner output and the
+manifest loading/role-path behaviour next. A role file existing on
+disk does not prove the hub loaded it. Use the installed manifest's
+absolute `roleFiles` path when auditing. The upstream OSE security
+guide has an `opkg` caveat, so re-scan success alone is not proof
+of a manually installed role being active.
+
+Rollback applies only to these specific newly created files. On TV,
+first verify their contents match the staging copies, then:
+
+```sh
+R=/var/luna-service2-dev/roles.d/org.webosbrew.lg-hue-sync.c5-rm-probe.role.json
+M=/var/luna-service2-dev/manifests.d/org.webosbrew.lg-hue-sync.c5-rm-probe.manifest.json
+S=/var/home/root/c5-ls2-role-stage
+cmp "$S/role.json" "$R" &&
+cmp "$S/manifest.json" "$M" &&
+rm -- "$M" "$R" &&
+ls-control scan-services
+```
+
+A restart/reboot might be required on some OEM implementations before
+removal takes effect; do not assume a file removal instantly revokes
+an already loaded hub role. Do not remove any other security file.
 
 ## Read-only C5 preflight (no registration)
 
