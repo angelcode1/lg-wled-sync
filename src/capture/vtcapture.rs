@@ -554,11 +554,7 @@ fn parse_smaps_spans(smaps: &str) -> Result<Vec<SmapsSpan>> {
 
 /// Cover the requested range completely using readable VMAs that expose
 /// VmFlags. No memory reads or GUP attempts. Names/locations are never logged.
-fn summarize_vma_range(
-    addr: usize,
-    len: usize,
-    regions: &[SmapsSpan],
-) -> Result<VmaAttributes> {
+fn summarize_vma_range(addr: usize, len: usize, regions: &[SmapsSpan]) -> Result<VmaAttributes> {
     if addr == 0 || len == 0 {
         return Err(anyhow!("invalid VMA sample range"));
     }
@@ -597,16 +593,8 @@ fn describe_descriptor_vmas(
     smaps: &str,
 ) -> Result<(VmaAttributes, VmaAttributes)> {
     let regions = parse_smaps_spans(smaps)?;
-    let y = summarize_vma_range(
-        descriptor.start_addr0 as usize,
-        summary.y_size,
-        &regions,
-    )?;
-    let uv = summarize_vma_range(
-        descriptor.start_addr1 as usize,
-        summary.uv_size,
-        &regions,
-    )?;
+    let y = summarize_vma_range(descriptor.start_addr0 as usize, summary.y_size, &regions)?;
+    let uv = summarize_vma_range(descriptor.start_addr1 as usize, summary.uv_size, &regions)?;
     Ok((y, uv))
 }
 
@@ -1803,10 +1791,8 @@ mod tests {
         assert!(uv.rss_nonzero && uv.segments == 1);
         assert!(summarize_vma_range(0x2800, 0x1800, &regions).is_err());
         assert!(summarize_vma_range(usize::MAX, 2, &regions).is_err());
-        let missing_flags = parse_smaps_spans(
-            "00001000-00002000 r--p 00000000 00:00 0\nRss: 0 kB\n",
-        )
-        .unwrap();
+        let missing_flags =
+            parse_smaps_spans("00001000-00002000 r--p 00000000 00:00 0\nRss: 0 kB\n").unwrap();
         assert!(summarize_vma_range(0x1000, 1, &missing_flags).is_err());
     }
 
