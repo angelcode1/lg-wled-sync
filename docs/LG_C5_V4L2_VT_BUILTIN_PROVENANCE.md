@@ -195,3 +195,95 @@ TV
 Continue avoiding driver state changes, new V4L2 ownership,
 direct PFNMMAP reads, `/dev/forcecapture`, developer marker
 changes, or any protected/Unknown content.
+
+
+## 2026-10-13: actual C5 platform identity confirmed
+
+A subsequent **read-only** query returned:
+
+```text
+kernel=5.4.268-324
+nyx-cmd DeviceInfo query device_name: o22n3
+/proc/device-tree/compatible:
+  lge,lg1213
+  lge,lg1k
+/sys/devices/soc0/soc_id: unavailable
+```
+
+This materially narrows the hardware lineage:
+
+- **O22N3** is LG's **LX-family 2025 C5** hardware platform;
+  the community `throwaway96/webos-kernel-drivers` source-identification
+  guide lists it among LX platform codes:
+  https://github.com/throwaway96/webos-kernel-drivers
+- A published independent OLED65C5 review likewise names **O22N3**
+  as the hardware platform:
+  https://geex.x-kom.pl/recenzje/recenzja-lg-oled65c5/
+- The publicly documented 2025 O22N3 firmware / OTA platform
+  identifier is **`HE_DTV_W25G_AFABATAA`**, corresponding to
+  the `W25G` family. A C5-family firmware extraction note supplies
+  a cross-check, **not an exact-match C5 kernel source**:
+  https://github.com/openlgtv/epk2extract/pull/143/files
+- `lge,lg1213` and `lge,lg1k` are device-tree compatible family
+  strings, **not model-unique identifiers**. Earlier O22
+  televisions also use LG1213; a source archive identified only by
+  that string must not be assumed compatible with O22N3 or the
+  deployed `5.4.268-324` kernel.
+- No `soc_id` is exposed in the checked path. **Do not invent or
+  infer a numeric SoC identifier**.
+
+### Source archive selection and provenance order
+
+1. Exact TV model **`OLED42C5PSA.AAUQLJD`** /
+   **`OLED42C5PSA`**, using the official LG TV open-source catalog:
+   https://opensource.lge.com/product/list?ctgr=005&subCtgr=006
+2. Board **`O22N3`** / firmware family
+   **`HE_DTV_W25G_AFABATAA`**.
+3. Running **`5.4.268-324` ARM64** kernel and its specific
+   manufacturing firmware release and build metadata.
+4. Presence of the actual vendor source for **`v4l2_vt`**,
+   especially `v4l2_vt_vidioc_dqbuf`,
+   `v4l2_vt_vidioc_expbuf`, `vt_capture_thread`,
+   `vt_capture_notification`, and its V4L2 ioctl ops table.
+
+**Source status:** Public search established this board family and
+its firmware naming, but **no model-and-build-verified LG kernel
+source archive containing `v4l2_vt` has yet been obtained**.
+LG's product catalog is dynamically populated, so the absence of
+a search-indexed item is not proof that an archive isn't listed.
+A matching GPL archive may also exclude separately licensed vendor
+driver files. Do not represent a general Linux 5.4 tree, C2 O22,
+or C4 O22N2 source package as a C5 driver match.
+
+LG's official source inquiry:
+https://opensource.lge.com/inquiry
+
+For a precise request, specify
+`OLED42C5PSA.AAUQLJD`, `O22N3`,
+`HE_DTV_W25G_AFABATAA`, `Linux 5.4.268-324`,
+and ask which released source package includes the bound
+`v4l2_vt` driver and its V4L2 buffer handlers.
+
+### Last missing safe matching detail: firmware release
+
+Do **not** dump all of `device_info.json` or `os_info.json`:
+those files can contain serial numbers, unique identifiers,
+hardware/network addresses and other unnecessary data.
+
+Instead print only allowlisted non-unique version fields:
+
+```sh
+ssh -T root@192.168.8.184 'sh -s' <<'TV'
+set -eu
+echo "===== C5 SOURCE PACKAGE VERSION ====="
+if [ -r /var/run/nyx/os_info.json ]; then
+    grep -E '"(core_os_kernel_version|webos_manufacturing_version|webos_build_id|webos_release|webos_release_platformcode)"[[:space:]]*:' /var/run/nyx/os_info.json || true
+else
+    echo "NYX_OS_INFO_UNAVAILABLE"
+fi
+echo "C5_SOURCE_PACKAGE_VERSION_COMPLETE"
+TV
+```
+
+This reads version metadata only, no video device, no kernel
+memory, no vendor marker, and no identifying secrets.
