@@ -1520,7 +1520,10 @@ mod tests {
             size1: 0x800,
         };
         check_descriptor_readable_mappings(&descriptor, layout, maps).unwrap();
+        // Adjacent planes are valid; overlapping planes are not.
         descriptor.start_addr1 = 0x2800usize as *mut u8;
+        check_descriptor_readable_mappings(&descriptor, layout, maps).unwrap();
+        descriptor.start_addr1 = 0x2700usize as *mut u8;
         assert!(check_descriptor_readable_mappings(&descriptor, layout, maps).is_err());
         descriptor.start_addr1 = 0x5000usize as *mut u8;
         assert!(check_descriptor_readable_mappings(&descriptor, layout, maps).is_err());
