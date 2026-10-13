@@ -57,6 +57,8 @@ jobs:
         run: bash -n scripts/c5_profile.sh
       - name: Test C5 profile importer (offline)
         run: python3 -m unittest discover -s scripts -p test_c5_profile_import.py -v
+      - name: Validate C5 LS2 registration-only role (offline)
+        run: python3 -m unittest discover -s scripts -p test_c5_ls2_role.py -v
       - name: Test LG native C++ exception boundary
         run: |
           c++ -std=c++11 -Wall -Wextra -Werror -O2 \
