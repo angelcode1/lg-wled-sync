@@ -605,6 +605,17 @@ fn describe_descriptor_vmas(
     Ok((y, uv))
 }
 
+/// Refuse kernel-mediated copying from device/PFN-backed VMAs before
+/// process_vm_readv. This is not evidence that other mappings are safe.
+fn reject_special_vmas_for_kernel_copy(y: VmaAttributes, uv: VmaAttributes) -> Result<()> {
+    if y.io || y.pf || y.mm || uv.io || uv.pf || uv.mm {
+        return Err(anyhow!(
+            "kernel-copy refused before syscall: IO/PFN/mixed VMA requires an audited driver capture interface"
+        ));
+    }
+    Ok(())
+}
+
 /// Select just one central Y sample and the corresponding 2-byte NV12
 /// chroma pair. Offset arithmetic is performed on integers, not pointers.
 fn checked_central_offsets(
@@ -1100,6 +1111,10 @@ impl VtCapture {
                             Some(describe_descriptor_vmas(&descriptor, validated, &smaps)?);
                     }
                     if sample_once {
+                        let smaps = std::fs::read_to_string("/proc/self/smaps")
+                            .context("cannot inspect own VMA flags before kernel copy")?;
+                        let (y, uv) = describe_descriptor_vmas(&descriptor, validated, &smaps)?;
+                        reject_special_vmas_for_kernel_copy(y, uv)?;
                         sample_three_bytes_kernel_only(&descriptor, layout, validated)?;
                     }
                     Some(validated)
@@ -1771,6 +1786,27 @@ impl Drop for VtCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn io_pfn_buffer_copy_is_rejected_before_syscall() {
+        let normal = VmaAttributes::default();
+        assert!(reject_special_vmas_for_kernel_copy(normal, normal).is_ok());
+        let c5 = VmaAttributes {
+            io: true,
+            pf: true,
+            dd: true,
+            segments: 1,
+            ..VmaAttributes::default()
+        };
+        assert!(reject_special_vmas_for_kernel_copy(c5, normal).is_err());
+        assert!(reject_special_vmas_for_kernel_copy(normal, c5).is_err());
+        assert!(reject_special_vmas_for_kernel_copy(c5, c5).is_err());
+        let mixed = VmaAttributes {
+            mm: true,
+            ..VmaAttributes::default()
+        };
+        assert!(reject_special_vmas_for_kernel_copy(normal, mixed).is_err());
+    }
 
     #[test]
     fn vma_flag_probe_detects_pfn_and_io_without_memory_access() {

@@ -34,3 +34,21 @@ access should be attempted.
 
 Passing a `VmFlags` inspection is **not** authorization for raw frame
 dereferencing, and does not prove that `process_vm_readv` will succeed.
+
+## 2026-10-13: confirmed live VM_IO / VM_PFNMAP
+
+On the known-Clear LG Media Discovery clip, both descriptor planes returned
+`io=true, pf=true, mm=false, dd=true, rss_nonzero=false, segments=1`.
+The VMA-flags probe exited 0, with no VT marker or /dev/video60 owner.
+Earlier kernel `process_vm_readv` produced `EFAULT` and exited cleanly.
+
+These attributes indicate device/PFN-backed mappings. `process_vm_readv` may
+fail to pin or copy this memory, even though `/proc/self/maps` indicates
+readable permissions. RSS=0 is not evidence of empty video.
+
+The kernel-copy diagnostic is now fail-closed on either plane carrying
+`VM_IO`, `VM_PFNMAP` or `VM_MIXEDMAP`. Do not retry via direct pointer
+dereference, /proc/self/mem or privileged memory access as an unexplained
+fallback. The next stage is an **offline** native-buffer ABI audit
+(requestBuffer/queryBuffer/initBuffer, mmap and cache synchronization).
+No policy or DRM checks are modified.
