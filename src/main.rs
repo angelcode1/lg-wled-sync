@@ -136,6 +136,12 @@ enum Commands {
         #[arg(long)]
         acknowledge_device_open: bool,
     },
+    /// Enumerate capture formats and read current metadata; never allocate a buffer
+    TestV4l2Formats {
+        /// Acknowledge one read-only V4L2 descriptor and metadata ioctls
+        #[arg(long)]
+        acknowledge_device_open: bool,
+    },
     /// Register/unregister a temporary private LS2 name without loading the VT capture driver
     TestLs2Registration {
         /// Explicitly acknowledge an active Luna bus registration attempt
@@ -214,6 +220,9 @@ async fn main() -> Result<()> {
         Commands::TestV4l2Querycap {
             acknowledge_device_open,
         } => run_test_v4l2_querycap(acknowledge_device_open),
+        Commands::TestV4l2Formats {
+            acknowledge_device_open,
+        } => run_test_v4l2_formats(acknowledge_device_open),
         Commands::TestLs2Registration {
             acknowledge_luna_registration,
             capture_client,
@@ -2564,6 +2573,62 @@ mod c5_v4l2_querycap_cli_tests {
         assert!(matches!(
             cli.command,
             Commands::TestV4l2Querycap {
+                acknowledge_device_open: true
+            }
+        ));
+    }
+}
+
+fn run_test_v4l2_formats(acknowledge_device_open: bool) -> Result<()> {
+    if !acknowledge_device_open {
+        return Err(anyhow!(
+            "test-v4l2-formats requires --acknowledge-device-open; opens /dev/video60 read-only"
+        ));
+    }
+    let report = capture::v4l2_metadata::query_c5_video60_formats()?;
+    for item in &report.formats {
+        info!(
+            "C5_V4L2_FORMAT: index={} fourcc={} description={} flags=0x{:08x}",
+            item.index, item.fourcc, item.description, item.flags
+        );
+    }
+    if let Some(current) = &report.current {
+        info!(
+            "C5_V4L2_G_FMT: width={} height={} fourcc={} num_planes={} plane_stride={:?} plane_sizeimage={:?}",
+            current.width, current.height, current.fourcc,
+            current.num_planes, current.plane_stride, current.plane_sizeimage
+        );
+    } else if report.current_unsupported {
+        info!("C5_V4L2_G_FMT_UNSUPPORTED: EINVAL or ENOTTY, no capture state changed");
+    }
+    info!(
+        "C5_V4L2_FORMATS_PASS: enumerated={} truncated={} ioctl_calls={} open_calls=1 reqbufs=0 qbuf=0 dqbuf=0 stream_ops=0 pixel_reads=0 fd_closed=true",
+        report.formats.len(), report.list_truncated, report.ioctl_calls
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod c5_v4l2_formats_cli_tests {
+    use super::*;
+
+    #[test]
+    fn formats_require_explicit_device_open_consent() {
+        let err = run_test_v4l2_formats(false).unwrap_err();
+        assert!(err.to_string().contains("--acknowledge-device-open"));
+    }
+
+    #[test]
+    fn formats_command_is_separate_from_capture() {
+        let cli = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-v4l2-formats",
+            "--acknowledge-device-open",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::TestV4l2Formats {
                 acknowledge_device_open: true
             }
         ));
