@@ -463,6 +463,13 @@ fn check_descriptor_readable_mappings(
 /// /proc/self/smaps is read only. Its VmFlags can identify device-backed
 /// mappings whose "r" permission alone does not guarantee GUP copyability.
 /// Never report addresses, file names, offsets, or frame contents.
+// Shared result type keeps the guarded native probe boundaries explicit.
+type C5NativeProbeResult = (
+    (u32, u32, u32),
+    Option<DescriptorSummary>,
+    Option<(VmaAttributes, VmaAttributes)>,
+);
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct VmaAttributes {
     io: bool,
@@ -963,11 +970,7 @@ impl VtCapture {
 
             // The closure must not return directly from the outer scope:
             // explicit cleanup has to run for both success and native refusal.
-            let operation = (|| -> Result<(
-                (u32, u32, u32),
-                Option<DescriptorSummary>,
-                Option<(VmaAttributes, VmaAttributes)>,
-            )> {
+            let operation = (|| -> Result<C5NativeProbeResult> {
                 let init_code = frame_native!(
                     lg_frame_guard_init,
                     "init",
