@@ -130,6 +130,12 @@ enum Commands {
         #[arg(long)]
         acknowledge_native_capture: bool,
     },
+    /// Read-only V4L2 VIDIOC_QUERYCAP for the verified C5 /dev/video60 node
+    TestV4l2Querycap {
+        /// Acknowledge one device open and one metadata-only VIDIOC_QUERYCAP
+        #[arg(long)]
+        acknowledge_device_open: bool,
+    },
     /// Register/unregister a temporary private LS2 name without loading the VT capture driver
     TestLs2Registration {
         /// Explicitly acknowledge an active Luna bus registration attempt
@@ -205,6 +211,9 @@ async fn main() -> Result<()> {
         Commands::TestFrameVmaFlags {
             acknowledge_native_capture,
         } => run_test_frame_vma_flags(acknowledge_native_capture).await,
+        Commands::TestV4l2Querycap {
+            acknowledge_device_open,
+        } => run_test_v4l2_querycap(acknowledge_device_open),
         Commands::TestLs2Registration {
             acknowledge_luna_registration,
             capture_client,
@@ -2503,6 +2512,58 @@ mod c5_frame_vma_flags_cli_tests {
             parsed.command,
             Commands::TestFrameVmaFlags {
                 acknowledge_native_capture: true
+            }
+        ));
+    }
+}
+
+/// Only a V4L2 metadata query: no active media capture, frame bytes,
+/// buffer queue or vendor permission mutation. Requires explicit consent.
+fn run_test_v4l2_querycap(acknowledge_device_open: bool) -> Result<()> {
+    if !acknowledge_device_open {
+        return Err(anyhow!(
+            "test-v4l2-querycap requires --acknowledge-device-open; will briefly open /dev/video60"
+        ));
+    }
+    let report = capture::v4l2_metadata::query_c5_video60_capabilities()?;
+    info!(
+        "C5_V4L2_QUERYCAP_PASS: driver={} card={} bus_info={} version={} capabilities=0x{:08x} device_caps=0x{:08x} effective_caps=0x{:08x} capture_mplane={} streaming={} readwrite={} open_calls=1 querycap_ioctls=1 reqbufs=0 qbuf=0 dqbuf=0 stream_ops=0 pixel_reads=0 fd_closed=true",
+        report.driver,
+        report.card,
+        report.bus_info,
+        report.version,
+        report.capabilities,
+        report.device_caps,
+        report.effective_caps,
+        report.capture_mplane,
+        report.streaming,
+        report.readwrite,
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod c5_v4l2_querycap_cli_tests {
+    use super::*;
+
+    #[test]
+    fn querycap_requires_explicit_device_open_consent() {
+        let error = run_test_v4l2_querycap(false).expect_err("must not open without acknowledgement");
+        assert!(error.to_string().contains("--acknowledge-device-open"));
+    }
+
+    #[test]
+    fn querycap_command_parses_distinctly_from_capture() {
+        let cli = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-v4l2-querycap",
+            "--acknowledge-device-open",
+        ])
+        .expect("querycap subcommand parses");
+        assert!(matches!(
+            cli.command,
+            Commands::TestV4l2Querycap {
+                acknowledge_device_open: true
             }
         ));
     }

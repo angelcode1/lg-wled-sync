@@ -4,6 +4,7 @@ pub mod histogram;
 pub mod luna_client;
 pub mod media;
 pub mod vtcapture;
+pub mod v4l2_metadata;
 
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
