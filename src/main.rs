@@ -124,6 +124,12 @@ enum Commands {
         #[arg(long)]
         acknowledge_native_capture: bool,
     },
+    /// Inspect PFN/IO flags for live VT descriptor VMAs without reading pixels
+    TestFrameVmaFlags {
+        /// Acknowledge one native metadata-only VMA flag inspection
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+    },
     /// Register/unregister a temporary private LS2 name without loading the VT capture driver
     TestLs2Registration {
         /// Explicitly acknowledge an active Luna bus registration attempt
@@ -196,6 +202,9 @@ async fn main() -> Result<()> {
         Commands::TestFrameKernelCopy {
             acknowledge_native_capture,
         } => run_test_frame_kernel_copy(acknowledge_native_capture).await,
+        Commands::TestFrameVmaFlags {
+            acknowledge_native_capture,
+        } => run_test_frame_vma_flags(acknowledge_native_capture).await,
         Commands::TestLs2Registration {
             acknowledge_luna_registration,
             capture_client,
@@ -2441,6 +2450,58 @@ mod c5_frame_kernel_copy_cli_tests {
         assert!(matches!(
             parsed.command,
             Commands::TestFrameKernelCopy {
+                acknowledge_native_capture: true
+            }
+        ));
+    }
+}
+
+/// Inspect only VmFlags for the Y and UV native descriptor mappings.
+/// No kernel-mediated or direct content access; no permission changes.
+async fn run_test_frame_vma_flags(acknowledge_native_capture: bool) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "test-frame-vma-flags requires --acknowledge-native-capture; uses native VT resources"
+        ));
+    }
+    for sample in 1..=3 {
+        let class = capture::media::query().await;
+        if class != PlaybackClass::Clear {
+            return Err(anyhow!(
+                "FRAME_VMA_FLAGS_REFUSED: media sample {sample}/3 is {class:?}; Unknown/Protected never qualifies"
+            ));
+        }
+        if sample < 3 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    info!("FRAME_VMA_FLAGS_CLEAR_GATE_PASS: 3/3 spaced Clear classifications");
+    VtCapture::probe_buffer_vma_flags_once()
+}
+
+#[cfg(test)]
+mod c5_frame_vma_flags_cli_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn vma_flag_probe_requires_explicit_acknowledgement() {
+        let error = run_test_frame_vma_flags(false)
+            .await
+            .expect_err("must refuse without opt in");
+        assert!(error.to_string().contains("--acknowledge-native-capture"));
+    }
+
+    #[test]
+    fn vma_flags_use_dedicated_metadata_only_command() {
+        let parsed = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-frame-vma-flags",
+            "--acknowledge-native-capture",
+        ])
+        .expect("parse VMA flags CLI");
+        assert!(matches!(
+            parsed.command,
+            Commands::TestFrameVmaFlags {
                 acknowledge_native_capture: true
             }
         ));

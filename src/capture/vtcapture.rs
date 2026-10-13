@@ -460,6 +460,156 @@ fn check_descriptor_readable_mappings(
     Ok(())
 }
 
+/// /proc/self/smaps is read only. Its VmFlags can identify device-backed
+/// mappings whose "r" permission alone does not guarantee GUP copyability.
+/// Never report addresses, file names, offsets, or frame contents.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct VmaAttributes {
+    io: bool,
+    pf: bool,
+    mm: bool,
+    dd: bool,
+    rss_nonzero: bool,
+    segments: usize,
+}
+
+#[derive(Debug)]
+struct SmapsSpan {
+    start: usize,
+    end: usize,
+    readable: bool,
+    has_flags: bool,
+    io: bool,
+    pf: bool,
+    mm: bool,
+    dd: bool,
+    rss_nonzero: bool,
+}
+
+fn smaps_header(line: &str) -> Option<(usize, usize, bool)> {
+    let mut fields = line.split_whitespace();
+    let range = fields.next()?;
+    let perms = fields.next()?;
+    let (start, end) = range.split_once('-')?;
+    if start.is_empty()
+        || end.is_empty()
+        || !start.bytes().all(|b| b.is_ascii_hexdigit())
+        || !end.bytes().all(|b| b.is_ascii_hexdigit())
+        || perms.len() != 4
+    {
+        return None;
+    }
+    let start = usize::from_str_radix(start, 16).ok()?;
+    let end = usize::from_str_radix(end, 16).ok()?;
+    if start >= end {
+        return None;
+    }
+    Some((start, end, perms.starts_with('r')))
+}
+
+fn parse_smaps_spans(smaps: &str) -> Result<Vec<SmapsSpan>> {
+    let mut regions: Vec<SmapsSpan> = Vec::new();
+    for line in smaps.lines() {
+        if let Some((start, end, readable)) = smaps_header(line) {
+            regions.push(SmapsSpan {
+                start,
+                end,
+                readable,
+                has_flags: false,
+                io: false,
+                pf: false,
+                mm: false,
+                dd: false,
+                rss_nonzero: false,
+            });
+            continue;
+        }
+        let Some(last) = regions.last_mut() else {
+            continue;
+        };
+        if let Some(flags) = line.strip_prefix("VmFlags:") {
+            last.has_flags = true;
+            for flag in flags.split_whitespace() {
+                match flag {
+                    "io" => last.io = true,
+                    "pf" => last.pf = true,
+                    "mm" => last.mm = true,
+                    "dd" => last.dd = true,
+                    _ => {}
+                }
+            }
+        } else if let Some(rss) = line.strip_prefix("Rss:") {
+            let value = rss
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| anyhow!("smaps RSS value is missing"))?
+                .parse::<u64>()
+                .context("smaps RSS value is invalid")?;
+            last.rss_nonzero = value > 0;
+        }
+    }
+    regions.sort_unstable_by_key(|span| span.start);
+    Ok(regions)
+}
+
+/// Cover the requested range completely using readable VMAs that expose
+/// VmFlags. No memory reads or GUP attempts. Names/locations are never logged.
+fn summarize_vma_range(
+    addr: usize,
+    len: usize,
+    regions: &[SmapsSpan],
+) -> Result<VmaAttributes> {
+    if addr == 0 || len == 0 {
+        return Err(anyhow!("invalid VMA sample range"));
+    }
+    let end = addr
+        .checked_add(len)
+        .ok_or_else(|| anyhow!("VMA sample range overflow"))?;
+    let mut cursor = addr;
+    let mut summary = VmaAttributes::default();
+    for region in regions {
+        if region.end <= cursor {
+            continue;
+        }
+        if region.start > cursor {
+            return Err(anyhow!("VMA sample range has a mapping gap"));
+        }
+        if !region.readable || !region.has_flags {
+            return Err(anyhow!("VMA sample is unreadable or VmFlags are absent"));
+        }
+        summary.io |= region.io;
+        summary.pf |= region.pf;
+        summary.mm |= region.mm;
+        summary.dd |= region.dd;
+        summary.rss_nonzero |= region.rss_nonzero;
+        summary.segments += 1;
+        cursor = cursor.max(region.end);
+        if cursor >= end {
+            return Ok(summary);
+        }
+    }
+    Err(anyhow!("VMA sample range is not fully mapped"))
+}
+
+fn describe_descriptor_vmas(
+    descriptor: &LibVtCaptureBufferInfo,
+    summary: DescriptorSummary,
+    smaps: &str,
+) -> Result<(VmaAttributes, VmaAttributes)> {
+    let regions = parse_smaps_spans(smaps)?;
+    let y = summarize_vma_range(
+        descriptor.start_addr0 as usize,
+        summary.y_size,
+        &regions,
+    )?;
+    let uv = summarize_vma_range(
+        descriptor.start_addr1 as usize,
+        summary.uv_size,
+        &regions,
+    )?;
+    Ok((y, uv))
+}
+
 /// Select just one central Y sample and the corresponding 2-byte NV12
 /// chroma pair. Offset arithmetic is performed on integers, not pointers.
 fn checked_central_offsets(
@@ -731,32 +881,38 @@ impl VtCapture {
     /// requests, pixel reads, output devices, or mode fallbacks are permitted.
     /// Call only after three fresh, positively Clear media classifications.
     pub fn probe_preprocess_metadata() -> Result<()> {
-        Self::probe_preprocess_once(false, false, false, false)
+        Self::probe_preprocess_once(false, false, false, false, false)
     }
 
     /// One native process invocation on a known-clear display-output source.
     /// No buffer metadata requests or pixel reads. Process MAY enable a stream.
     pub fn probe_process_no_buffers() -> Result<()> {
-        Self::probe_preprocess_once(true, false, false, false)
+        Self::probe_preprocess_once(true, false, false, false, false)
     }
 
     /// Exactly one request for the native buffer *descriptor*, not its bytes.
     /// The returned pointers are treated as opaque: never logged, copied or
     /// dereferenced. The source must have been independently verified Clear.
     pub fn probe_buffer_descriptor_once() -> Result<()> {
-        Self::probe_preprocess_once(true, true, false, false)
+        Self::probe_preprocess_once(true, true, false, false, false)
     }
 
     /// Validate the Y and UV descriptor address ranges against readable VMAs
     /// while the native capture session is alive. No pixel loads or copies.
     pub fn probe_buffer_mappings_once() -> Result<()> {
-        Self::probe_preprocess_once(true, true, true, false)
+        Self::probe_preprocess_once(true, true, true, false, false)
     }
 
     /// First tightly bounded content access: three bytes copied by the
     /// kernel from the two opaque planes, with no logging or persistence.
     pub fn probe_three_byte_kernel_copy_once() -> Result<()> {
-        Self::probe_preprocess_once(true, true, true, true)
+        Self::probe_preprocess_once(true, true, true, true, false)
+    }
+
+    /// After an EFAULT, inspect live native-buffer VMA flags ONLY. No readv,
+    /// direct pointer dereference, frame copying or permissions workaround.
+    pub fn probe_buffer_vma_flags_once() -> Result<()> {
+        Self::probe_preprocess_once(true, true, true, false, true)
     }
 
     fn probe_preprocess_once(
@@ -764,6 +920,7 @@ impl VtCapture {
         descriptor_once: bool,
         mapping_once: bool,
         sample_once: bool,
+        vma_flags_once: bool,
     ) -> Result<()> {
         if mapping_once && (!process_once || !descriptor_once) {
             return Err(anyhow!(
@@ -774,6 +931,9 @@ impl VtCapture {
             return Err(anyhow!(
                 "bounded sample requires readable mapping validation"
             ));
+        }
+        if vma_flags_once && (!mapping_once || sample_once) {
+            return Err(anyhow!("VMA flag inspection requires mapping-only mode"));
         }
         let lib = unsafe { Library::new(LIBVTCAPTURE_PATH) }
             .context("unable to load LG VT library for metadata-only probe")?;
@@ -815,7 +975,11 @@ impl VtCapture {
 
             // The closure must not return directly from the outer scope:
             // explicit cleanup has to run for both success and native refusal.
-            let operation = (|| -> Result<((u32, u32, u32), Option<DescriptorSummary>)> {
+            let operation = (|| -> Result<(
+                (u32, u32, u32),
+                Option<DescriptorSummary>,
+                Option<(VmaAttributes, VmaAttributes)>,
+            )> {
                 let init_code = frame_native!(
                     lg_frame_guard_init,
                     "init",
@@ -909,6 +1073,7 @@ impl VtCapture {
                 // One native descriptor fetch; no retry, pointer arithmetic,
                 // buffer reading, slices, hashes, or image/light output.
                 // An error code is terminal and cleanup is still performed.
+                let mut vma_report = None;
                 let summary = if descriptor_once {
                     let mut descriptor = LibVtCaptureBufferInfo {
                         start_addr0: std::ptr::null_mut(),
@@ -937,6 +1102,11 @@ impl VtCapture {
                             .context("cannot inspect own process VMA map")?;
                         check_descriptor_readable_mappings(&descriptor, validated, &maps)?;
                     }
+                    if vma_flags_once {
+                        let smaps = std::fs::read_to_string("/proc/self/smaps")
+                            .context("cannot read own /proc/self/smaps")?;
+                        vma_report = Some(describe_descriptor_vmas(&descriptor, validated, &smaps)?);
+                    }
                     if sample_once {
                         sample_three_bytes_kernel_only(&descriptor, layout, validated)?;
                     }
@@ -944,13 +1114,20 @@ impl VtCapture {
                 } else {
                     None
                 };
-                Ok((layout, summary))
+                Ok((layout, summary, vma_report))
             })();
 
             let cleanup = session.cleanup();
             match (operation, cleanup) {
-                (Ok(((width, height, stride), summary)), Ok(())) => {
-                    if let Some(summary) = summary {
+                (Ok(((width, height, stride), summary, vma_report)), Ok(())) => {
+                    if let Some((y, uv)) = vma_report {
+                        info!(
+                            "C5_FRAME_VMA_FLAGS_PASS: display-output plane={}x{} stride={} y_io={} y_pf={} y_mm={} y_dd={} y_rss_nonzero={} y_segments={} uv_io={} uv_pf={} uv_mm={} uv_dd={} uv_rss_nonzero={} uv_segments={} kernel_copy_calls=0 pixel_reads=0 clean_shutdown=true",
+                            width, height, stride,
+                            y.io, y.pf, y.mm, y.dd, y.rss_nonzero, y.segments,
+                            uv.io, uv.pf, uv.mm, uv.dd, uv.rss_nonzero, uv.segments
+                        );
+                    } else if let Some(summary) = summary {
                         if sample_once {
                             info!(
                                 "C5_FRAME_KERNEL_COPY_PASS: display-output plane={}x{} stride={} sample_bytes=3 kernel_copy_calls=2 native_pointer_dereferences=0 pixel_values_logged=0 clean_shutdown=true",
@@ -1602,6 +1779,36 @@ impl Drop for VtCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vma_flag_probe_detects_pfn_and_io_without_memory_access() {
+        let smaps = concat!(
+            "00001000-00002000 rw-s 00000000 00:00 0 /dev/example\n",
+            "Rss:                   0 kB\n",
+            "VmFlags: rd wr mr mw pf io dd\n",
+            "00002000-00003000 r--s 00000000 00:00 0 /dev/example\n",
+            "Rss:                   4 kB\n",
+            "VmFlags: rd mr mm\n",
+            "00004000-00005000 rw-p 00000000 00:00 0\n",
+            "Rss:                   8 kB\n",
+            "VmFlags: rd wr mr mw\n",
+        );
+        let regions = parse_smaps_spans(smaps).unwrap();
+        let y = summarize_vma_range(0x1800, 0x1000, &regions).unwrap();
+        assert!(y.io && y.pf && y.mm && y.dd);
+        assert!(y.rss_nonzero);
+        assert_eq!(y.segments, 2);
+        let uv = summarize_vma_range(0x4000, 0x800, &regions).unwrap();
+        assert!(!uv.io && !uv.pf && !uv.mm);
+        assert!(uv.rss_nonzero && uv.segments == 1);
+        assert!(summarize_vma_range(0x2800, 0x1800, &regions).is_err());
+        assert!(summarize_vma_range(usize::MAX, 2, &regions).is_err());
+        let missing_flags = parse_smaps_spans(
+            "00001000-00002000 r--p 00000000 00:00 0\nRss: 0 kB\n",
+        )
+        .unwrap();
+        assert!(summarize_vma_range(0x1000, 1, &missing_flags).is_err());
+    }
 
     #[test]
     fn bounded_three_byte_offsets_are_centered_and_reject_short_planes() {
