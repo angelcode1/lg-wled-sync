@@ -21,6 +21,23 @@ unsafe extern "C" {
 
 const DEVICE: &str = "/usr/lib/libvtcapture.so.1";
 const MARKER: &str = "/var/luna/preferences/vt_devmode";
+
+// Exact C5 library supplied from the TV and disassembled offline (BuildID
+// 9fb5e56d59c29ed242c0e4a66015c71601a4657e). Its VtHistogram::initHistogram
+// returns literal 7 without initializing anything; its getHistogram returns
+// 1/2 without writing the caller's output buffer. The API is stubbed in this
+// binary; permissions cannot make it yield usable histogram samples.
+// Fail before creating the temporary developer marker or calling vendor code.
+const C5_STUBBED_VT_HISTOGRAM_SHA256: [u8; 32] = [
+    0x64, 0x83, 0xfc, 0x0b, 0x82, 0xa9, 0xda, 0x6f, 0x65, 0xe1, 0x1e, 0x85, 0xf9, 0xdc, 0x43,
+    0xbb, 0x16, 0x3d, 0xe8, 0x0f, 0xe2, 0xc3, 0xc8, 0x4b, 0x84, 0xaf, 0xa2, 0x51, 0xb0, 0xf6,
+    0x89, 0x2c,
+];
+
+fn is_known_stubbed_histogram_library(bytes: &[u8]) -> bool {
+    openssl::sha::sha256(bytes) == C5_STUBBED_VT_HISTOGRAM_SHA256
+}
+
 static REVOKED: AtomicBool = AtomicBool::new(false);
 extern "C" fn policy_revoked() -> bool {
     REVOKED.store(true, Ordering::SeqCst);
@@ -317,6 +334,15 @@ impl HistogramCapture {
         if std::mem::size_of::<NativeHistogram>() != 0x604 {
             bail!("LG histogram ABI record size mismatch");
         }
+        // Best-effort exact-binary detection. If reading this file fails,
+        // retain the existing dlopen error path for a useful diagnosis.
+        if let Ok(bytes) = fs::read(DEVICE) {
+            if is_known_stubbed_histogram_library(&bytes) {
+                bail!(
+                    "LG C5 native histogram unavailable: this exact libvtcapture build has a stubbed VtHistogram API (initHistogram always returns 7; getHistogram writes no bins). No VT initialization attempted"
+                );
+            }
+        }
         // SAFETY: layout and four native signatures mirror the uploaded
         // HyperDRM 0.13.0 source. Runtime ABI still needs TV verification.
         unsafe {
@@ -340,7 +366,7 @@ impl HistogramCapture {
             }
             let handle = init_result?;
             if handle.is_null() {
-                bail!("LG rejected histogram initialization (capture busy or denied?)");
+                bail!("LG native histogram initialization returned null (underlying reason unavailable; check vendor logs and ELF support)");
             }
             match guarded_preset(preset, handle, 0) {
                 Ok(0) => {}
@@ -570,6 +596,13 @@ impl HistogramSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn c5_vendor_stub_fingerprint_does_not_match_normal_data() {
+        assert!(!is_known_stubbed_histogram_library(b""));
+        assert!(!is_known_stubbed_histogram_library(b"not an LG ELF"));
+        assert_eq!(C5_STUBBED_VT_HISTOGRAM_SHA256.len(), 32);
+    }
+
     #[test]
     fn spatial_mapping_requires_exact_tv_model_and_four_edges() {
         let points = [0.25, 1.25, 2.25, 3.25]
