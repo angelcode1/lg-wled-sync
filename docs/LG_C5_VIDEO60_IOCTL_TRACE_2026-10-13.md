@@ -53,14 +53,26 @@ does not show custom, nonstandard ioctl command numbers.
 | 20 | `VIDIOC_REQBUFS` | `count=0`, `V4L2_MEMORY_MMAP`: queue teardown |
 | 21 | release | `v4l2_release`, successful |
 
-**Count discrepancy requiring explanation:** the probe's requested
-`_LibVtCaptureProperties.buf_cnt` is `3`. The kernel sees
-`REQBUFS count=5` yet only **3** `QUERYBUF` indices and six
-mapping calls in the reported run. Do not assume the driver actually
-returned five allocated buffers from the request; the per-node debug
-line documents the **requested** count. Investigate the exact vendor
-buffer-count accounting and returned `v4l2_requestbuffers.count`
-before designing another owner.
+**Buffer count is resolved at the ioctl/API level:** the metadata
+probe sets `_LibVtCaptureProperties.buf_cnt=3`; the audited native
+`preprocessVtCapture` copies this value to `VtDriver+0xac`
+(`0x1209e–0x120b6`), and `requestBuffer` copies that same
+field into `v4l2_requestbuffers.count` before
+`ioctl(VIDIOC_REQBUFS)` (`0x102fa–0x10320`). V4L2 core's
+`dev_debug` prints the request structure **after** the ioctl
+handler, not on entry. Hence `count=5` in the successful trace is
+the count **returned by the driver**, consistent with it increasing
+the originally requested **3** to **5**; this is explicitly permitted
+by the V4L2 API. The vendor's `initBuffer` and
+`preprocessVtCapture` loops still use the internal count **3**,
+so only `QUERYBUF(0..2)` and the six Y/UV mappings are observed.
+Exactly *why* the driver grants five buffers (minimum allocation,
+internal latency, etc.) is unknown without driver-level evidence.
+Unqueried buffers are not permission to access or reassign them.
+
+References: https://www.kernel.org/doc/html/v5.5/media/uapi/v4l/vidioc-reqbufs.html
+and Linux V4L2 ioctl debug dispatch:
+https://code.googlesource.com/linux/torvalds/linux/+/826c484166f0f74bd8fc09220f99dc937c9297cf/drivers/media/v4l2-core/v4l2-ioctl.c
 
 **Missing operations are not proof of their absence.** `dev_debug=7`
 deliberately suppresses `VIDIOC_QBUF`, `VIDIOC_DQBUF` and
@@ -101,11 +113,12 @@ mutation of the driver outside the permitted native API.
 
 1. **Stop repeating standard QUERYCAP/ENUM_FMT/G_FMT probes.**
    The standard V4L2 lifecycle has been observed directly.
-2. Focus **offline** on the exact vendor buffer-count accounting:
-   `preprocessVtCapture → requestBuffer → initBuffer →
-   queryBuffer → queueBuffer`. Specifically explain
-   `REQBUFS(5)` vs `QUERYBUF(0..2)` and investigate whether
-   any consumer-held buffer mechanism exists.
+2. The vendor-side count accounting is now explained:
+   `buf_cnt=3` requested, driver reports **5** after REQBUFS,
+   and LG loops over **3** mapped buffers. Remaining offline
+   work: investigate the driver's minimum-buffer requirement
+   and whether an authorized *consumer-held* buffer mechanism
+   exists. Do not infer buffer ownership from an extra allocation.
 3. Review vendor extended-control payload structures and any driver
    module source/binary only if lawfully available. There is no need
    to send another active TV ioctl for this.
