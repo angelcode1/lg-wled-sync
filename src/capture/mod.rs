@@ -125,6 +125,14 @@ pub fn create_capture(width: u32, height: u32) -> Box<dyn ScreenCapture> {
         }
     }
 
+    // A known C5 ELF is not the older C1/DILE platform. If its guarded VT
+    // frame path failed, do not execute a legacy vendor backend without an
+    // independently audited ABI/permission model.
+    if histogram::is_known_c5_vendor_elf() {
+        warn!("LG C5 guarded frame backend unavailable; legacy DILE fallback disabled for this exact ELF");
+        return Box::new(MockCapture::new(width, height));
+    }
+
     // 2. Try legacy libdile_vt (/usr/lib/libdile_vt.so.0)
     match DileVtCapture::try_new(width, height, 0) {
         Ok(capture) => {
