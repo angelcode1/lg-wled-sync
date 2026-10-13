@@ -78,3 +78,53 @@ metadata only*. It does not prove buffer ownership, CPU accessibility,
 freshness, DMA synchronization, or authorization to start capture.
 If rejected, stop standard format probing and prioritize the supported
 vendor `vtCapture_planeInfo` metadata path instead.
+
+## 2026-10-13: successful idle G_FMT with empty values
+
+The independently selected one-shot G_FMT returned success (0) but
+\`width=0 height=0 fourcc=.... num_planes=0\`, with no plane strides or
+image sizes. Device was idle. These zeros are **not an actual capture
+format**; the driver likely has no format configured in that state.
+
+This repo's ARM32 G_FMT request is already **0xC0CC5604**, with a
+204-byte \`v4l2_format\`. It does not issue the aarch64 native 208-byte
+request \`0xC0D05604\`. A 64-bit kernel with ARM32 userspace uses
+compat ioctl translation; sending the wrong request can silently
+misalign returned fields. That specific mistake is not present here.
+
+The earlier \`ENUM_FMT\` ENOTTY is due to the absent registered
+enum op and fixed \`valid_ioctls\` set: it is not a transient
+playback/permissions event. \`EXT_PIX_FORMAT\` is injected by V4L2
+core and does not establish a special vendor driver capability.
+
+## Preferred next diagnostic: existing capture + per-node dev_debug
+
+\`scripts/c5_v4l2_dev_debug_trace.sh\` wraps the previously tested
+\`/var/home/root/c5-histogram-probe test-frame-vma-flags
+--acknowledge-native-capture\` with the device-specific sysfs
+\`dev_debug=7\` trace. The known-good executable is compared against
+the archived \`lg-hue-sync.59ec38e\` staging binary to avoid unexpected
+behavior. The capture command itself performs three spaced \`Clear\`
+checks, a single metadata-only native capture lifecycle and cleanup.
+
+The trace checks \`video60\` driver identity, no developer marker,
+no detected device owner, and writable \`dev_debug\` and \`/dev/kmsg\`.
+It saves the original \`dev_debug\`, writes BEGIN and END markers to
+the kernel log, enables mask 7 temporarily and uses a shell EXIT/signal
+trap to restore the original state. It does not change LS2 roles,
+touch the vendor marker, read pixels, or create a second capture
+queue. Failure to restore must be treated as a serious error and
+corrected immediately.
+
+Linux 5.4 documents mask 0x01 as ioctl names, 0x02 as ioctl arguments,
+0x04 as file operations; 0x08 controls noisy QBUF/DQBUF and read/write
+logging and 0x10 controls poll. The trace is scoped to \`video60\`:
+https://kernel.org/doc/html/v5.4/media/kapi/v4l2-dev.html
+
+**Do not blindly replicate a traced ioctl sequence**. Standard
+ioctls identify the vendor's operations, not an application-held buffer
+lease, DMA synchronization guarantee or DRM authorization. A native
+status refusal, \`Unknown\` or \`Protected\` playback is always a stop
+condition. If there are no video60 messages, verify marker presence,
+dev_debug availability and the actual successful invocation before
+concluding the driver was not used.

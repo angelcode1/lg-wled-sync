@@ -59,6 +59,8 @@ jobs:
         run: |
           sh -n scripts/c5_v4l2_sysfs_inventory.sh
           python3 -m unittest discover -s scripts -p test_c5_v4l2_sysfs_inventory.py -v
+      - name: Verify C5 per-node dev_debug trace syntax
+        run: sh -n scripts/c5_v4l2_dev_debug_trace.sh
       - name: Test C5 profile importer (offline)
         run: python3 -m unittest discover -s scripts -p test_c5_profile_import.py -v
       - name: Validate C5 LS2 registration-only role (offline)
