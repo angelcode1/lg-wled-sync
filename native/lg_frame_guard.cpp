@@ -82,7 +82,6 @@ extern "C" int lg_frame_guard_finalize(LgFrameFinalize fn, void* driver,
                           *result = fn(driver, client); }, error, cap);
 }
 extern "C" int lg_frame_guard_release(LgFrameRelease fn, void* driver,
-                                       int* result, char* error, std::size_t cap) noexcept {
-    return protect([&] { require(fn); require(driver); require(result);
-                          *result = fn(driver); }, error, cap);
+                                       char* error, std::size_t cap) noexcept {
+    return protect([&] { require(fn); require(driver); fn(driver); }, error, cap);
 }

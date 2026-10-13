@@ -30,7 +30,8 @@ typedef int (*LgFrameCurrentBuffer)(void*, LgFrameBufferInfo*);
 typedef int (*LgFrameStop)(void*, const char*);
 typedef int (*LgFramePostprocess)(void*, const char*);
 typedef int (*LgFrameFinalize)(void*, const char*);
-typedef int (*LgFrameRelease)(void*);
+// Release is virtual cleanup: no native integer status contract.
+typedef void (*LgFrameRelease)(void*);
 
 // Return 0 when the vendor call completed, -1 if the C++ boundary caught an
 // exception or received invalid pointers. Native integer returns are written
@@ -44,6 +45,6 @@ int lg_frame_guard_current_buffer(LgFrameCurrentBuffer, void*, LgFrameBufferInfo
 int lg_frame_guard_stop(LgFrameStop, void*, const char*, int*, char*, std::size_t) noexcept;
 int lg_frame_guard_postprocess(LgFramePostprocess, void*, const char*, int*, char*, std::size_t) noexcept;
 int lg_frame_guard_finalize(LgFrameFinalize, void*, const char*, int*, char*, std::size_t) noexcept;
-int lg_frame_guard_release(LgFrameRelease, void*, int*, char*, std::size_t) noexcept;
+int lg_frame_guard_release(LgFrameRelease, void*, char*, std::size_t) noexcept;
 
 } // extern "C"

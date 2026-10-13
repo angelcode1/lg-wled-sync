@@ -63,7 +63,9 @@ type FnVtCaptureCurrentCaptureBuffInfo =
 type FnVtCaptureStop = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
 type FnVtCapturePostprocess = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
 type FnVtCaptureFinalize = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
-type FnVtCaptureRelease = unsafe extern "C" fn(*mut c_void) -> c_int;
+// Native vtCapture_release dispatches driver cleanup via the vtable; it has
+// no documented integer status on the audited C5. Never interpret r0 as rc.
+type FnVtCaptureRelease = unsafe extern "C" fn(*mut c_void);
 
 // The C5's native C++ code can throw during LS2/Resource Manager registration.
 // Every Linux native frame call, including cleanup and Drop, goes through the
@@ -146,7 +148,6 @@ unsafe extern "C" {
     fn lg_frame_guard_release(
         f: FnVtCaptureRelease,
         driver: *mut c_void,
-        rc: *mut c_int,
         err: *mut c_char,
         cap: usize,
     ) -> c_int;
@@ -182,6 +183,23 @@ macro_rules! frame_native {
             Ok::<c_int, anyhow::Error>(unsafe { ($fn_ptr)($($arg),*) })
         }
     }};
+}
+
+// The C5's release entry point tail-dispatches via the driver vtable.
+// It is a cleanup operation, NOT an integer-returning status API.
+// Report only the C++ guard boundary result, including exceptions.
+fn frame_release(f: FnVtCaptureRelease, driver: *mut c_void) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut error = [0 as c_char; 256];
+        let outcome = unsafe { lg_frame_guard_release(f, driver, error.as_mut_ptr(), error.len()) };
+        frame_guard_check("release", outcome, &error)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        unsafe { f(driver) };
+        Ok(())
+    }
 }
 
 unsafe fn frame_create(f: FnVtCaptureCreate) -> Result<*mut c_void> {
@@ -357,7 +375,7 @@ impl VtCapture {
             };
 
             // Attempt release even if init/finalize returned an error.
-            let release_result = frame_native!(lg_frame_guard_release, "release", *release, driver);
+            let release_result = frame_release(*release, driver);
 
             let init_code = init_result?;
             if init_code != 0 {
@@ -381,15 +399,8 @@ impl VtCapture {
                 }
                 .into());
             }
-            let release_code = release_result?;
-            if release_code != 0 {
-                return Err(NativeCaptureError {
-                    backend: "libvtcapture",
-                    operation: "vtCapture_release",
-                    code: release_code,
-                }
-                .into());
-            }
+            // A completed, non-throwing release has no integer status.
+            release_result?;
             info!("C5_FRAME_INIT_ONLY_PASS: initialized and released; no preprocess or frame read");
             Ok(())
         }
@@ -481,12 +492,12 @@ impl VtCapture {
             ) {
                 Ok(rc) => rc,
                 Err(err) => {
-                    let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
+                    let _ = frame_release(*fn_release, driver);
                     return Err(err);
                 }
             };
             if ret_init != 0 {
-                let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
+                let _ = frame_release(*fn_release, driver);
                 if ret_init == 11 {
                     error!(
                         "[-] vtCapture_init returned native status 11 (Resource Manager acquisition failed in the audited C5 ELF); not necessarily errno EBUSY"
@@ -503,7 +514,7 @@ impl VtCapture {
             let client_str = match CStr::from_bytes_until_nul(&client_id) {
                 Ok(value) => value.to_string_lossy(),
                 Err(_) => {
-                    let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
+                    let _ = frame_release(*fn_release, driver);
                     return Err(anyhow!("vtCapture_init returned an unterminated client ID"));
                 }
             };
@@ -542,7 +553,7 @@ impl VtCapture {
                         driver,
                         client_ptr
                     );
-                    let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
+                    let _ = frame_release(*fn_release, driver);
                     return Err(err);
                 }
             };
@@ -554,7 +565,7 @@ impl VtCapture {
                     driver,
                     client_ptr
                 );
-                let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
+                let _ = frame_release(*fn_release, driver);
                 return Err(NativeCaptureError {
                     backend: "libvtcapture",
                     operation: "vtCapture_preprocess",
@@ -583,7 +594,7 @@ impl VtCapture {
                         driver,
                         client_ptr
                     );
-                    let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
+                    let _ = frame_release(*fn_release, driver);
                     return Err(err);
                 }
             };
@@ -595,7 +606,7 @@ impl VtCapture {
                     driver,
                     client_ptr
                 );
-                let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
+                let _ = frame_release(*fn_release, driver);
                 return Err(NativeCaptureError {
                     backend: "libvtcapture",
                     operation: "vtCapture_planeInfo",
@@ -613,7 +624,7 @@ impl VtCapture {
                         driver,
                         client_ptr
                     );
-                    let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
+                    let _ = frame_release(*fn_release, driver);
                     return Err(error);
                 }
             };
@@ -628,7 +639,7 @@ impl VtCapture {
                         driver,
                         client_ptr
                     );
-                    let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
+                    let _ = frame_release(*fn_release, driver);
                     return Err(error);
                 }
             };
@@ -670,7 +681,7 @@ impl VtCapture {
                         driver,
                         client_ptr
                     );
-                    let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
+                    let _ = frame_release(*fn_release, driver);
                     return Err(err);
                 }
             };
@@ -690,7 +701,7 @@ impl VtCapture {
                     driver,
                     client_ptr
                 );
-                let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
+                let _ = frame_release(*fn_release, driver);
                 return Err(anyhow!("vtCapture_process failed with code {}", ret_proc));
             }
 
@@ -997,12 +1008,7 @@ impl Drop for VtCapture {
                     client_ptr
                 );
             }
-            let _ = frame_native!(
-                lg_frame_guard_release,
-                "release",
-                self.fn_release,
-                self.driver
-            );
+            let _ = frame_release(self.fn_release, self.driver);
             self.driver = std::ptr::null_mut();
         }
     }

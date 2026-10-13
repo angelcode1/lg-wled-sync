@@ -14,7 +14,9 @@ int bad_plane(void*, const char*, LgFramePlaneInfo*) { throw std::runtime_error(
 int bad_process(void*, const char*) { throw std::runtime_error("process exception"); }
 int good_process(void*, const char*) { return 11; }
 int bad_buffer(void*, LgFrameBufferInfo*) { throw std::runtime_error("buffer exception"); }
-int bad_release(void*) { throw std::runtime_error("release exception"); }
+void bad_release(void*) { throw std::runtime_error("release exception"); }
+int release_calls = 0;
+void good_release(void*) { ++release_calls; }
 }
 int main() {
     char error[128]{};
@@ -51,8 +53,11 @@ int main() {
     assert(std::strcmp(error, "process exception") == 0);
     assert(lg_frame_guard_postprocess(bad_process, handle, name, &rc, error, sizeof(error)) == -1);
     assert(lg_frame_guard_finalize(bad_process, handle, name, &rc, error, sizeof(error)) == -1);
-    assert(lg_frame_guard_release(bad_release, handle, &rc, error, sizeof(error)) == -1);
+    assert(lg_frame_guard_release(good_release, handle, error, sizeof(error)) == 0);
+    assert(release_calls == 1 && error[0] == '\0');
+    assert(lg_frame_guard_release(bad_release, handle, error, sizeof(error)) == -1);
     assert(std::strcmp(error, "release exception") == 0);
+    assert(release_calls == 1);
     assert(lg_frame_guard_process(nullptr, handle, name, &rc, error, sizeof(error)) == -1);
     assert(std::strcmp(error, "missing native frame pointer") == 0);
 }
