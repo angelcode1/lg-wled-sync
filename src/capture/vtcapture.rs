@@ -323,7 +323,7 @@ fn central_nv12_stats(
 }
 
 /**
- * One-shot metadata probe owner. Once preprocess has been attempted, even a
+ * One-shot native probe owner. Once preprocess has been attempted, even a
  * native error may have partially armed the scaler: attempt postprocess before
  * finalize and release. No 'process' or buffer API is ever called here.
  */
@@ -332,7 +332,9 @@ struct C5MetadataSession {
     client_id: [u8; 128],
     initialized: bool,
     preprocess_attempted: bool,
+    process_attempted: bool,
     released: bool,
+    stop: FnVtCaptureStop,
     postprocess: FnVtCapturePostprocess,
     finalize: FnVtCaptureFinalize,
     release: FnVtCaptureRelease,
@@ -345,6 +347,21 @@ impl C5MetadataSession {
         }
         let mut issues = Vec::new();
         let client = self.client_id.as_ptr() as *const c_char;
+        // A failed/throwing process may have partially started capture.
+        // Attempt stop before postprocess in that case; never read buffers.
+        if self.process_attempted {
+            match frame_native!(
+                lg_frame_guard_stop,
+                "stop",
+                self.stop,
+                self.driver,
+                client
+            ) {
+                Ok(0) => {}
+                Ok(code) => issues.push(format!("stop returned {code}")),
+                Err(error) => issues.push(format!("stop guard: {error:#}")),
+            }
+        }
         if self.preprocess_attempted {
             match frame_native!(
                 lg_frame_guard_postprocess,
@@ -487,6 +504,16 @@ impl VtCapture {
     /// requests, pixel reads, output devices, or mode fallbacks are permitted.
     /// Call only after three fresh, positively Clear media classifications.
     pub fn probe_preprocess_metadata() -> Result<()> {
+        Self::probe_preprocess_once(false)
+    }
+
+    /// One native process invocation on a known-clear display-output source.
+    /// No buffer metadata requests or pixel reads. Process MAY enable a stream.
+    pub fn probe_process_no_buffers() -> Result<()> {
+        Self::probe_preprocess_once(true)
+    }
+
+    fn probe_preprocess_once(process_once: bool) -> Result<()> {
         let lib = unsafe { Library::new(LIBVTCAPTURE_PATH) }
             .context("unable to load LG VT library for metadata-only probe")?;
         let caller = CString::new("org.webosbrew.lg-hue-sync")?;
@@ -497,6 +524,8 @@ impl VtCapture {
             let init: Symbol<FnVtCaptureInit> = lib.get(b"vtCapture_init\0")?;
             let preprocess: Symbol<FnVtCapturePreprocess> = lib.get(b"vtCapture_preprocess\0")?;
             let plane_info: Symbol<FnVtCapturePlaneInfo> = lib.get(b"vtCapture_planeInfo\0")?;
+            let process: Symbol<FnVtCaptureProcess> = lib.get(b"vtCapture_process\0")?;
+            let stop: Symbol<FnVtCaptureStop> = lib.get(b"vtCapture_stop\0")?;
             let postprocess: Symbol<FnVtCapturePostprocess> =
                 lib.get(b"vtCapture_postprocess\0")?;
             let finalize: Symbol<FnVtCaptureFinalize> = lib.get(b"vtCapture_finalize\0")?;
@@ -512,7 +541,9 @@ impl VtCapture {
                 client_id: [0u8; 128],
                 initialized: false,
                 preprocess_attempted: false,
+                process_attempted: false,
                 released: false,
+                stop: *stop,
                 postprocess: *postprocess,
                 finalize: *finalize,
                 release: *release,
@@ -588,17 +619,46 @@ impl VtCapture {
                     }
                     .into());
                 }
-                checked_plane_dimensions(&plane)
-                    .context("native plane metadata failed bounds validation")
+                let layout = checked_plane_dimensions(&plane)
+                    .context("native plane metadata failed bounds validation")?;
+
+                if process_once {
+                    // Mark attempted before entry: a native error or exception
+                    // may occur after partial stream activation.
+                    session.process_attempted = true;
+                    let process_code = frame_native!(
+                        lg_frame_guard_process,
+                        "process",
+                        *process,
+                        session.driver,
+                        session.client_id.as_ptr() as *const c_char
+                    )?;
+                    if process_code != 0 {
+                        return Err(NativeCaptureError {
+                            backend: "libvtcapture",
+                            operation: "vtCapture_process",
+                            code: process_code,
+                        }
+                        .into());
+                    }
+                }
+                Ok(layout)
             })();
 
             let cleanup = session.cleanup();
             match (operation, cleanup) {
                 (Ok((width, height, stride)), Ok(())) => {
-                    info!(
-                        "C5_FRAME_METADATA_PASS: display-output plane={}x{} stride={} clean_shutdown=true frame_reads=0",
-                        width, height, stride
-                    );
+                    if process_once {
+                        info!(
+                            "C5_FRAME_PROCESS_PASS: display-output plane={}x{} stride={} process_calls=1 frame_reads=0 clean_shutdown=true",
+                            width, height, stride
+                        );
+                    } else {
+                        info!(
+                            "C5_FRAME_METADATA_PASS: display-output plane={}x{} stride={} clean_shutdown=true frame_reads=0",
+                            width, height, stride
+                        );
+                    }
                     Ok(())
                 }
                 (Err(error), Ok(())) => Err(error),
@@ -1223,9 +1283,90 @@ mod tests {
     use super::*;
 
     #[test]
+    fn process_probe_cleanup_stops_before_postprocess_finalize_release() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn stop(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 0);
+            0
+        }
+        unsafe extern "C" fn post(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 1);
+            0
+        }
+        unsafe extern "C" fn finalise(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 2);
+            0
+        }
+        unsafe extern "C" fn release(_: *mut c_void) {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 3);
+        }
+
+        CALLS.store(0, Ordering::SeqCst);
+        let mut session = C5MetadataSession {
+            driver: std::ptr::dangling_mut::<c_void>(),
+            client_id: [0; 128],
+            initialized: true,
+            preprocess_attempted: true,
+            process_attempted: true,
+            released: false,
+            stop,
+            postprocess: post,
+            finalize: finalise,
+            release,
+        };
+        session.cleanup().unwrap();
+        session.cleanup().unwrap();
+        drop(session);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn process_probe_attempts_full_cleanup_on_stop_refusal() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn stop(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 0);
+            17
+        }
+        unsafe extern "C" fn post(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 1);
+            0
+        }
+        unsafe extern "C" fn finalise(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 2);
+            0
+        }
+        unsafe extern "C" fn release(_: *mut c_void) {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 3);
+        }
+
+        CALLS.store(0, Ordering::SeqCst);
+        let mut session = C5MetadataSession {
+            driver: std::ptr::dangling_mut::<c_void>(),
+            client_id: [0; 128],
+            initialized: true,
+            preprocess_attempted: true,
+            process_attempted: true,
+            released: false,
+            stop,
+            postprocess: post,
+            finalize: finalise,
+            release,
+        };
+        let err = session.cleanup().unwrap_err().to_string();
+        assert!(err.contains("stop returned 17"));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 4);
+        assert!(session.released);
+    }
+
+    #[test]
     fn metadata_probe_cleanup_runs_once_in_correct_order_without_a_device() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static CALLS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn fake_stop(_: *mut c_void, _: *const c_char) -> c_int {
+            panic!("metadata-only probe must not call stop")
+        }
         unsafe extern "C" fn fake_post(_: *mut c_void, _: *const c_char) -> c_int {
             assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 0);
             0
@@ -1244,7 +1385,9 @@ mod tests {
             client_id: [0; 128],
             initialized: true,
             preprocess_attempted: true,
+            process_attempted: false,
             released: false,
+            stop: fake_stop,
             postprocess: fake_post,
             finalize: fake_final,
             release: fake_release,
@@ -1271,7 +1414,9 @@ mod tests {
             client_id: [0; 128],
             initialized: false,
             preprocess_attempted: false,
+            process_attempted: false,
             released: false,
+            stop: unexpected,
             postprocess: unexpected,
             finalize: unexpected,
             release: fake_release,

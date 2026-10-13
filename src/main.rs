@@ -100,6 +100,12 @@ enum Commands {
         #[arg(long)]
         acknowledge_native_capture: bool,
     },
+    /// One native process/stop cycle, without requesting or reading frame buffers
+    TestFrameProcess {
+        /// Acknowledge temporary activation of native capture processing
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+    },
     /// Register/unregister a temporary private LS2 name without loading the VT capture driver
     TestLs2Registration {
         /// Explicitly acknowledge an active Luna bus registration attempt
@@ -160,6 +166,9 @@ async fn main() -> Result<()> {
         Commands::TestFrameMetadata {
             acknowledge_native_capture,
         } => run_test_frame_metadata(acknowledge_native_capture).await,
+        Commands::TestFrameProcess {
+            acknowledge_native_capture,
+        } => run_test_frame_process(acknowledge_native_capture).await,
         Commands::TestLs2Registration {
             acknowledge_luna_registration,
             capture_client,
@@ -2197,6 +2206,58 @@ mod c5_frame_metadata_cli_tests {
         assert!(matches!(
             parsed.command,
             Commands::TestFrameMetadata {
+                acknowledge_native_capture: true
+            }
+        ));
+    }
+}
+
+/// One process call against verified unprotected media. The synchronous native
+/// call is bounded externally by the owner's timeout and cleans up normally.
+async fn run_test_frame_process(acknowledge_native_capture: bool) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "test-frame-process requires --acknowledge-native-capture; process may activate LG VT capture"
+        ));
+    }
+    for sample in 1..=3 {
+        let class = capture::media::query().await;
+        if class != PlaybackClass::Clear {
+            return Err(anyhow!(
+                "FRAME_PROCESS_REFUSED: media sample {sample}/3 is {class:?}; requires independently known unprotected media"
+            ));
+        }
+        if sample < 3 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    info!("FRAME_PROCESS_CLEAR_GATE_PASS: 3/3 spaced Clear classifications");
+    VtCapture::probe_process_no_buffers()
+}
+
+#[cfg(test)]
+mod c5_frame_process_cli_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn process_probe_requires_acknowledgement() {
+        let error = run_test_frame_process(false)
+            .await
+            .expect_err("must refuse before querying media");
+        assert!(error.to_string().contains("--acknowledge-native-capture"));
+    }
+
+    #[test]
+    fn process_subcommand_parses_explicit_opt_in() {
+        let parsed = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-frame-process",
+            "--acknowledge-native-capture",
+        ])
+        .expect("process command parses");
+        assert!(matches!(
+            parsed.command,
+            Commands::TestFrameProcess {
                 acknowledge_native_capture: true
             }
         ));
