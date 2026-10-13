@@ -1096,7 +1096,8 @@ impl VtCapture {
                     if vma_flags_once {
                         let smaps = std::fs::read_to_string("/proc/self/smaps")
                             .context("cannot read own /proc/self/smaps")?;
-                        vma_report = Some(describe_descriptor_vmas(&descriptor, validated, &smaps)?);
+                        vma_report =
+                            Some(describe_descriptor_vmas(&descriptor, validated, &smaps)?);
                     }
                     if sample_once {
                         sample_three_bytes_kernel_only(&descriptor, layout, validated)?;
