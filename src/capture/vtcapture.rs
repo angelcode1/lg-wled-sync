@@ -322,6 +322,83 @@ fn central_nv12_stats(
     })
 }
 
+
+/**
+ * One-shot metadata probe owner. Once preprocess has been attempted, even a
+ * native error may have partially armed the scaler: attempt postprocess before
+ * finalize and release. No 'process' or buffer API is ever called here.
+ */
+struct C5MetadataSession {
+    driver: *mut c_void,
+    client_id: [u8; 128],
+    initialized: bool,
+    preprocess_attempted: bool,
+    released: bool,
+    postprocess: FnVtCapturePostprocess,
+    finalize: FnVtCaptureFinalize,
+    release: FnVtCaptureRelease,
+}
+
+impl C5MetadataSession {
+    fn cleanup(&mut self) -> Result<()> {
+        if self.released {
+            return Ok(());
+        }
+        let mut issues = Vec::new();
+        let client = self.client_id.as_ptr() as *const c_char;
+        if self.preprocess_attempted {
+            match frame_native!(
+                lg_frame_guard_postprocess,
+                "postprocess",
+                self.postprocess,
+                self.driver,
+                client
+            ) {
+                Ok(0) => {}
+                Ok(code) => issues.push(format!("postprocess returned {code}")),
+                Err(error) => issues.push(format!("postprocess guard: {error:#}")),
+            }
+        }
+        if self.initialized {
+            match frame_native!(
+                lg_frame_guard_finalize,
+                "finalize",
+                self.finalize,
+                self.driver,
+                client
+            ) {
+                Ok(0) => {}
+                Ok(code) => issues.push(format!("finalize returned {code}")),
+                Err(error) => issues.push(format!("finalize guard: {error:#}")),
+            }
+        }
+
+        // Never repeat a release, even if its native destructor threw after
+        // partially destroying the driver. The C++ guard handles exceptions.
+        self.released = true;
+        if let Err(error) = frame_release(self.release, self.driver) {
+            issues.push(format!("release guard: {error:#}"));
+        }
+        self.driver = std::ptr::null_mut();
+
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!("C5 metadata probe cleanup: {}", issues.join("; ")))
+        }
+    }
+}
+
+impl Drop for C5MetadataSession {
+    fn drop(&mut self) {
+        if !self.released {
+            if let Err(error) = self.cleanup() {
+                warn!("C5 metadata probe fallback cleanup: {error:#}");
+            }
+        }
+    }
+}
+
 impl VtCapture {
     /// Bounded, explicit native *initialization-only* diagnostic.
     ///
@@ -403,6 +480,135 @@ impl VtCapture {
             release_result?;
             info!("C5_FRAME_INIT_ONLY_PASS: initialized and released; no preprocess or frame read");
             Ok(())
+        }
+    }
+
+    /// Single, opt-in preprocessing/plane-layout diagnostic. Preprocess may
+    /// briefly arm the LG display-output scaler; no frame processing, buffer
+    /// requests, pixel reads, output devices, or mode fallbacks are permitted.
+    /// Call only after three fresh, positively Clear media classifications.
+    pub fn probe_preprocess_metadata() -> Result<()> {
+        let lib = unsafe { Library::new(LIBVTCAPTURE_PATH) }
+            .context("unable to load LG VT library for metadata-only probe")?;
+        let caller = CString::new("org.webosbrew.lg-hue-sync")?;
+
+        // Resolve all required symbols before creating the native driver.
+        unsafe {
+            let create: Symbol<FnVtCaptureCreate> = lib.get(b"vtCapture_create\0")?;
+            let init: Symbol<FnVtCaptureInit> = lib.get(b"vtCapture_init\0")?;
+            let preprocess: Symbol<FnVtCapturePreprocess> =
+                lib.get(b"vtCapture_preprocess\0")?;
+            let plane_info: Symbol<FnVtCapturePlaneInfo> = lib.get(b"vtCapture_planeInfo\0")?;
+            let postprocess: Symbol<FnVtCapturePostprocess> =
+                lib.get(b"vtCapture_postprocess\0")?;
+            let finalize: Symbol<FnVtCaptureFinalize> = lib.get(b"vtCapture_finalize\0")?;
+            let release: Symbol<FnVtCaptureRelease> = lib.get(b"vtCapture_release\0")?;
+
+            let driver = frame_create(*create)?;
+            if driver.is_null() {
+                return Err(anyhow!("vtCapture_create returned null"));
+            }
+
+            let mut session = C5MetadataSession {
+                driver,
+                client_id: [0u8; 128],
+                initialized: false,
+                preprocess_attempted: false,
+                released: false,
+                postprocess: *postprocess,
+                finalize: *finalize,
+                release: *release,
+            };
+            session.client_id[..2].copy_from_slice(b"00");
+
+            // The closure must not return directly from the outer scope:
+            // explicit cleanup has to run for both success and native refusal.
+            let operation = (|| -> Result<(u32, u32, u32)> {
+                let init_code = frame_native!(
+                    lg_frame_guard_init,
+                    "init",
+                    *init,
+                    session.driver,
+                    caller.as_ptr(),
+                    session.client_id.as_mut_ptr() as *mut c_char
+                )?;
+                if init_code != 0 {
+                    return Err(NativeCaptureError {
+                        backend: "libvtcapture",
+                        operation: "vtCapture_init",
+                        code: init_code,
+                    }
+                    .into());
+                }
+                session.initialized = true;
+                CStr::from_bytes_until_nul(&session.client_id)
+                    .context("native init returned an unterminated client ID")?;
+
+                // One fixed, low-resolution display-output request. Never try
+                // HDMI/scaler-input alternatives after an error or refusal.
+                let props = LibVtCaptureProperties {
+                    dump: 2,
+                    loc_x: 0,
+                    loc_y: 0,
+                    reg_w: 320,
+                    reg_h: 180,
+                    buf_cnt: 3,
+                    frm: 30,
+                };
+                session.preprocess_attempted = true;
+                let prep_code = frame_native!(
+                    lg_frame_guard_preprocess,
+                    "preprocess",
+                    *preprocess,
+                    session.driver,
+                    session.client_id.as_ptr() as *const c_char,
+                    &props
+                )?;
+                if prep_code != 0 {
+                    return Err(NativeCaptureError {
+                        backend: "libvtcapture",
+                        operation: "vtCapture_preprocess",
+                        code: prep_code,
+                    }
+                    .into());
+                }
+
+                let mut plane = LibVtCapturePlaneInfo::default();
+                let plane_code = frame_native!(
+                    lg_frame_guard_plane_info,
+                    "plane-info",
+                    *plane_info,
+                    session.driver,
+                    session.client_id.as_ptr() as *const c_char,
+                    &mut plane
+                )?;
+                if plane_code != 0 {
+                    return Err(NativeCaptureError {
+                        backend: "libvtcapture",
+                        operation: "vtCapture_planeInfo",
+                        code: plane_code,
+                    }
+                    .into());
+                }
+                checked_plane_dimensions(&plane)
+                    .context("native plane metadata failed bounds validation")
+            })();
+
+            let cleanup = session.cleanup();
+            match (operation, cleanup) {
+                (Ok((width, height, stride)), Ok(())) => {
+                    info!(
+                        "C5_FRAME_METADATA_PASS: display-output plane={}x{} stride={} clean_shutdown=true frame_reads=0",
+                        width, height, stride
+                    );
+                    Ok(())
+                }
+                (Err(error), Ok(())) => Err(error),
+                (Ok(_), Err(error)) => Err(error),
+                (Err(native), Err(cleanup)) => {
+                    Err(native.context(format!("native cleanup also failed: {cleanup:#}")))
+                }
+            }
         }
     }
 
@@ -1017,6 +1223,64 @@ impl Drop for VtCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_probe_cleanup_runs_once_in_correct_order_without_a_device() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn fake_post(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 0);
+            0
+        }
+        unsafe extern "C" fn fake_final(_: *mut c_void, _: *const c_char) -> c_int {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 1);
+            0
+        }
+        unsafe extern "C" fn fake_release(_: *mut c_void) {
+            assert_eq!(CALLS.fetch_add(1, Ordering::SeqCst), 2);
+        }
+
+        CALLS.store(0, Ordering::SeqCst);
+        let mut session = C5MetadataSession {
+            driver: std::ptr::dangling_mut::<c_void>(),
+            client_id: [0; 128],
+            initialized: true,
+            preprocess_attempted: true,
+            released: false,
+            postprocess: fake_post,
+            finalize: fake_final,
+            release: fake_release,
+        };
+        session.cleanup().unwrap();
+        session.cleanup().unwrap();
+        drop(session);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn metadata_probe_release_after_init_refusal_skips_postprocess_and_finalize() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static RELEASED: AtomicBool = AtomicBool::new(false);
+        unsafe extern "C" fn unexpected(_: *mut c_void, _: *const c_char) -> c_int {
+            panic!("not initialized, should not clean up as initialized");
+        }
+        unsafe extern "C" fn fake_release(_: *mut c_void) {
+            RELEASED.store(true, Ordering::SeqCst);
+        }
+        RELEASED.store(false, Ordering::SeqCst);
+        let mut session = C5MetadataSession {
+            driver: std::ptr::dangling_mut::<c_void>(),
+            client_id: [0; 128],
+            initialized: false,
+            preprocess_attempted: false,
+            released: false,
+            postprocess: unexpected,
+            finalize: unexpected,
+            release: fake_release,
+        };
+        session.cleanup().unwrap();
+        assert!(RELEASED.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn test_vtcapture_struct_sizes() {

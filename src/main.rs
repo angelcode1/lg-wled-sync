@@ -94,6 +94,12 @@ enum Commands {
         #[arg(long)]
         acknowledge_native_capture: bool,
     },
+    /// One fixed display-output preprocess + plane metadata check; no frame reads
+    TestFrameMetadata {
+        /// Acknowledge that preprocess may activate the hardware scaler briefly
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+    },
     /// Register/unregister a temporary private LS2 name without loading the VT capture driver
     TestLs2Registration {
         /// Explicitly acknowledge an active Luna bus registration attempt
@@ -151,6 +157,9 @@ async fn main() -> Result<()> {
         Commands::TestFrameInit {
             acknowledge_native_capture,
         } => run_test_frame_init(acknowledge_native_capture).await,
+        Commands::TestFrameMetadata {
+            acknowledge_native_capture,
+        } => run_test_frame_metadata(acknowledge_native_capture).await,
         Commands::TestLs2Registration {
             acknowledge_luna_registration,
             capture_client,
@@ -2135,6 +2144,57 @@ mod c5_frame_init_cli_tests {
         assert!(matches!(
             parsed.command,
             Commands::TestFrameInit {
+                acknowledge_native_capture: true
+            }
+        ));
+    }
+}
+
+/// Preprocess can enable the VT display-output hardware momentarily. Require
+/// explicit owner intent and independently fresh, repeated media clearance.
+/// A refusal is terminal: do not switch native dump modes or retry.
+async fn run_test_frame_metadata(acknowledge_native_capture: bool) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "test-frame-metadata requires --acknowledge-native-capture; preprocess may enable the LG scaler"
+        ));
+    }
+    for sample in 1..=3 {
+        let class = capture::media::query().await;
+        if class != PlaybackClass::Clear {
+            return Err(anyhow!(
+                "FRAME_METADATA_REFUSED: media sample {sample}/3 is {class:?}; Unknown/Protected cannot be captured"
+            ));
+        }
+        if sample < 3 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    info!("FRAME_METADATA_CLEAR_GATE_PASS: 3/3 spaced Clear classifications");
+    VtCapture::probe_preprocess_metadata()
+}
+
+#[cfg(test)]
+mod c5_frame_metadata_cli_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn metadata_command_requires_acknowledgement_before_native_access() {
+        let error = run_test_frame_metadata(false).await.expect_err("must refuse");
+        assert!(error.to_string().contains("--acknowledge-native-capture"));
+    }
+
+    #[test]
+    fn metadata_cli_command_parses_with_opt_in() {
+        let parsed = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-frame-metadata",
+            "--acknowledge-native-capture",
+        ])
+        .expect("metadata CLI parse");
+        assert!(matches!(
+            parsed.command,
+            Commands::TestFrameMetadata {
                 acknowledge_native_capture: true
             }
         ));
