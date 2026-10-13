@@ -1,6 +1,6 @@
 # LG C5: registration-only Luna diagnostic (no capture)
 
-Status: **registration-only Resource Manager name succeeds on the owner's C5 after the narrowly scoped development role was installed and scanned**. The earlier baseline rejected the same name family with `LSError -1027`. The native histogram has not produced a sample. HDMI HDCP remains `Unknown`.
+Status: **both independent LS2 name families now register and unregister successfully** on the owner's C5 after installing the reviewed stage-two regular role. Both were previously rejected individually with `-1027 Invalid permissions`. The native histogram has not produced a sample. HDMI HDCP remains `Unknown`.
 
 ## Purpose and provenance
 
@@ -286,6 +286,64 @@ verify the capture permission whitelist, policy callbacks,
 16-region histogram ABI, edge calibration or HDMI secure-video
 availability. The histogram probe remains blocked pending
 separate engineering review.
+
+## 2026-10-13: stage-two LS2 registration A/B — both PASS
+
+The owner verified the installed stage-one role matched the reviewed
+fixture, `vt_devmode` was absent, and a backup was created before
+atomically replacing only the owned development role with
+`stage2-role.json`. The manifest remained unchanged.
+`ls-control scan-services` printed:
+
+```text
+telling hub to reload setting and rescan all directories
+```
+
+The registration-only output (under the exact executable path
+`/var/home/root/c5-histogram-probe`) was:
+
+```text
+LS2_PROBE_ATTEMPT kind=resource-manager executable=/var/home/root/c5-histogram-probe name=com.webos.rm.client._lghuesyncprobe29136 private_bus=true capture=false
+LS2_PROBE_OK name=com.webos.rm.client._lghuesyncprobe29136 registered=true unregistered=true capture=false
+LS2_PROBE_ATTEMPT kind=capture-client executable=/var/home/root/c5-histogram-probe name=com.webos.service.capture.client9141 private_bus=true capture=false
+LS2_PROBE_OK name=com.webos.service.capture.client9141 registered=true unregistered=true capture=false
+RESOURCE_MANAGER_EXIT=0
+CAPTURE_CLIENT_EXIT=0
+STAGE2_LS2_REGISTRATION_PASS
+```
+
+Confirmed: **both distinct LG native registration families** are
+authorised by an executable-specific `regular` LS2 role. The
+capture-client identity has `outbound: []`; the Resource Manager
+identity retains only `com.webos.media`. No `["all"]` or
+capture API permission group was added. The stage-two role and
+unchanged manifest are **currently present on the TV**.
+
+This establishes registration/unregistration only, **not** permissions
+to call capture APIs, capture-service application whitelisting,
+`vtCapture_initHistogram` success, secure/scrambled video access,
+calibration, or content from HDMI. Keep the native DRM refusal path
+intact.
+
+### Native VT hardware gate before any additional test
+
+The histogram probe implementation's original marker guardian used
+`poll(..., 10_000)`, which could remove `vt_devmode` while
+slow native initialization remained active. Commit
+`b60710570348bd4b7bec730b715f2a067c886d3e` changes this to
+wait for pipe closure on normal shutdown or parent death, handling
+`EINTR`. **Use a new CI-green ARMv7 binary containing that fix**
+before any future histogram run; the on-TV stage-two registration
+binary predates it.
+
+If a hardware test is later justified, use only an explicitly
+unprotected TV-generated source (not Prime Video or a protected HDMI
+session), with no competing VT owner, no pre-existing marker,
+two bounded samples, no lighting output, and a post-run marker
+check. Respect all `LIB_CAPTURE_REFUSED_*` outcomes and do not widen
+capture service permissions to overcome those refusals. Capture
+source suitability and device state must be checked separately;
+no hardware test is claimed in this document.
 
 ## Read-only C5 preflight (no registration)
 
