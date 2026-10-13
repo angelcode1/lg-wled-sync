@@ -341,6 +341,43 @@ pub fn query_c5_video60_formats() -> Result<V4l2FormatReport> {
     })
 }
 
+/// Independent, explicitly selected *read-only* metadata probe. The C5
+/// answered ENOTTY to ENUM_FMT index zero, so this command does not call
+/// ENUM_FMT or reinterpret that refusal as permission to change formats.
+#[cfg(target_os = "linux")]
+pub fn query_c5_video60_current_format() -> Result<V4l2CurrentFormat> {
+    use std::os::fd::AsRawFd;
+
+    if std::mem::size_of::<V4l2Format>() != 204 {
+        bail!("V4L2 current-format structure does not match ARM32 ABI");
+    }
+    let file = open_verified_video60()?;
+    let capabilities = querycap_fd(&file)?;
+    if !capabilities.capture_mplane {
+        bail!("device does not advertise V4L2 multi-planar capture");
+    }
+    let mut request = V4l2Format {
+        kind: MPLANE_CAPTURE,
+        raw_data: [0; 200],
+    };
+    // Only VIDIOC_G_FMT; never ENUM_FMT, S_FMT, REQBUFS or stream ioctls.
+    let rc = unsafe { libc::ioctl(file.as_raw_fd(), VIDIOC_G_FMT, &mut request) };
+    if rc < 0 {
+        return Err(anyhow!(
+            "VIDIOC_G_FMT refused: {} (one attempt, no fallback)",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let result = parse_mplane_format(&request)?;
+    drop(file);
+    Ok(result)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn query_c5_video60_current_format() -> Result<V4l2CurrentFormat> {
+    Err(anyhow!("C5 V4L2 current-format probe requires Linux"))
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn query_c5_video60_formats() -> Result<V4l2FormatReport> {
     Err(anyhow!("C5 V4L2 format metadata probe requires Linux"))

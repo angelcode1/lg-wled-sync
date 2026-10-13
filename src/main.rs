@@ -142,6 +142,12 @@ enum Commands {
         #[arg(long)]
         acknowledge_device_open: bool,
     },
+    /// Query only the current multi-planar format, without ENUM_FMT or capture
+    TestV4l2CurrentFormat {
+        /// Acknowledge one device open and read-only QUERYCAP + G_FMT
+        #[arg(long)]
+        acknowledge_device_open: bool,
+    },
     /// Register/unregister a temporary private LS2 name without loading the VT capture driver
     TestLs2Registration {
         /// Explicitly acknowledge an active Luna bus registration attempt
@@ -223,6 +229,9 @@ async fn main() -> Result<()> {
         Commands::TestV4l2Formats {
             acknowledge_device_open,
         } => run_test_v4l2_formats(acknowledge_device_open),
+        Commands::TestV4l2CurrentFormat {
+            acknowledge_device_open,
+        } => run_test_v4l2_current_format(acknowledge_device_open),
         Commands::TestLs2Registration {
             acknowledge_luna_registration,
             capture_client,
@@ -2629,6 +2638,50 @@ mod c5_v4l2_formats_cli_tests {
         assert!(matches!(
             cli.command,
             Commands::TestV4l2Formats {
+                acknowledge_device_open: true
+            }
+        ));
+    }
+}
+
+/// Dedicated G_FMT-only diagnostic after ENUM_FMT returned ENOTTY.
+/// No frame access, changes to V4L2 settings, retry or alternative node.
+fn run_test_v4l2_current_format(acknowledge_device_open: bool) -> Result<()> {
+    if !acknowledge_device_open {
+        return Err(anyhow!(
+            "test-v4l2-current-format requires --acknowledge-device-open; opens /dev/video60 read-only"
+        ));
+    }
+    let result = capture::v4l2_metadata::query_c5_video60_current_format()?;
+    info!(
+        "C5_V4L2_G_FMT_PASS: width={} height={} fourcc={} num_planes={} plane_stride={:?} plane_sizeimage={:?} device_open_calls=1 querycap=1 g_fmt=1 enum_fmt=0 s_fmt=0 reqbufs=0 qbuf=0 dqbuf=0 stream_ops=0 pixel_reads=0 fd_closed=true",
+        result.width, result.height, result.fourcc, result.num_planes,
+        result.plane_stride, result.plane_sizeimage
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod c5_v4l2_current_format_cli_tests {
+    use super::*;
+
+    #[test]
+    fn current_format_requires_explicit_opt_in() {
+        let err = run_test_v4l2_current_format(false).unwrap_err();
+        assert!(err.to_string().contains("--acknowledge-device-open"));
+    }
+
+    #[test]
+    fn current_format_is_dedicated_not_enumeration_command() {
+        let cli = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-v4l2-current-format",
+            "--acknowledge-device-open",
+        ])
+        .expect("parse G_FMT-only command");
+        assert!(matches!(
+            cli.command,
+            Commands::TestV4l2CurrentFormat {
                 acknowledge_device_open: true
             }
         ));
