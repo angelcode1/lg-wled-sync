@@ -125,6 +125,25 @@ unsafe fn frame_create(f: FnVtCaptureCreate) -> Result<*mut c_void> {
 }
 
 
+// Reject malformed or oversized metadata before native buffer pointers are dereferenced.
+// A valid C5 layout must be established independently of our requested resolution.
+fn checked_plane_dimensions(plane: &LibVtCapturePlaneInfo) -> Result<(u32, u32, u32)> {
+    if plane.plane_w <= 0 || plane.plane_h <= 0 || plane.stride <= 0 {
+        return Err(anyhow!("LG frame plane has absent dimensions or stride"));
+    }
+    let width = plane.plane_w as u32;
+    let height = plane.plane_h as u32;
+    let stride = plane.stride as u32;
+    if width > 4096 || height > 2160 || stride > 8192
+        || width % 2 != 0 || height % 2 != 0
+        || stride % 2 != 0 || stride < width
+    {
+        return Err(anyhow!("LG frame plane exceeds bounded NV12 geometry or is misaligned"));
+    }
+    nv12_lengths(width, height, stride)?;
+    Ok((width, height, stride))
+}
+
 /// Native libvtcapture driver implementation for LG webOS 6.x (LG C1 OLED).
 pub struct VtCapture {
     driver: *mut c_void,
@@ -370,30 +389,13 @@ impl VtCapture {
                     code: ret_plane,
                 }.into());
             }
-            if plane_info.plane_w <= 0 || plane_info.plane_h <= 0
-                || plane_info.stride <= 0 || plane_info.stride < plane_info.plane_w as c_int
-            {
-                let _ = frame_native!(lg_frame_guard_finalize, "finalize", *fn_finalize, driver, client_ptr);
-                let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
-                return Err(anyhow!("vtCapture_planeInfo returned invalid dimensions/stride"));
-            }
-
-            // Honor actual hardware-configured plane dimensions if reported, otherwise fallback to target
-            let width = if plane_info.plane_w > 0 {
-                plane_info.plane_w as u32
-            } else {
-                target_width
-            };
-            let height = if plane_info.plane_h > 0 {
-                plane_info.plane_h as u32
-            } else {
-                target_height
-            };
-
-            let stride = if plane_info.stride > 0 && plane_info.stride as u32 >= width {
-                plane_info.stride as u32
-            } else {
-                width
+            let (width, height, stride) = match checked_plane_dimensions(&plane_info) {
+                Ok(layout) => layout,
+                Err(error) => {
+                    let _ = frame_native!(lg_frame_guard_finalize, "finalize", *fn_finalize, driver, client_ptr);
+                    let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
+                    return Err(error);
+                }
             };
 
             let rgb_size = match nv12_lengths(width, height, stride) {
@@ -716,6 +718,31 @@ mod tests {
         assert_eq!(std::mem::size_of::<LibVtCapturePlaneInfo>(), 20);
         #[cfg(target_pointer_width = "32")]
         assert_eq!(std::mem::size_of::<LibVtCaptureBufferInfo>(), 16);
+    }
+
+    #[test]
+    fn c5_plane_validation_rejects_oversized_unaligned_and_missing_geometry() {
+        let mut plane = LibVtCapturePlaneInfo {
+            stride: 320,
+            plane_w: 320,
+            plane_h: 180,
+            ..Default::default()
+        };
+        assert_eq!(checked_plane_dimensions(&plane).unwrap(), (320, 180, 320));
+        plane.stride = 200;
+        assert!(checked_plane_dimensions(&plane).is_err());
+        plane.stride = 8200;
+        assert!(checked_plane_dimensions(&plane).is_err());
+        plane.stride = 320;
+        plane.plane_h = 0;
+        assert!(checked_plane_dimensions(&plane).is_err());
+        plane.plane_h = 181;
+        assert!(checked_plane_dimensions(&plane).is_err());
+        plane.plane_h = 180;
+        plane.plane_w = 319;
+        assert!(checked_plane_dimensions(&plane).is_err());
+        plane.plane_w = 320;
+        assert!(checked_plane_dimensions(&plane).is_ok());
     }
 
     #[test]
