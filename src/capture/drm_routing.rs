@@ -66,36 +66,52 @@ impl DrmCaptureRouter {
         histogram: HistogramHealth,
         now: Instant,
     ) -> Decision {
-        match playback {
+        // No frame capture on Unknown, including startup and a failed/stale
+        // media query. A reported Clear must remain stable for two seconds
+        // before we permit *initialization*, not just publication.
+        let clear_stable = match playback {
             PlaybackClass::Protected => {
                 self.protected = true;
                 self.clear_since = None;
+                false
             }
-            PlaybackClass::Clear if self.protected => {
+            PlaybackClass::Unknown => {
+                self.clear_since = None;
+                false
+            }
+            PlaybackClass::Clear => {
                 let since = *self.clear_since.get_or_insert(now);
                 if now.saturating_duration_since(since) >= self.clear_stability {
                     self.protected = false;
-                    self.clear_since = None;
+                    true
+                } else {
+                    false
                 }
             }
-            PlaybackClass::Unknown => self.clear_since = None,
-            PlaybackClass::Clear => (),
-        }
-        let use_histogram = match self.mode {
-            CaptureMode::AutoDrmFirst => self.protected,
-            CaptureMode::FrameOnly => false,
-            CaptureMode::HistogramOnly => true,
+        };
+
+        // A protection latch is never overridden by the FrameOnly option.
+        // Histogram access is separate from video frame access and can only
+        // be used when a real, healthy backend exists.
+        let source = if self.protected {
+            if self.mode != CaptureMode::FrameOnly && histogram == HistogramHealth::Valid {
+                Source::Histogram
+            } else {
+                Source::Hold
+            }
+        } else if !clear_stable {
+            Source::Hold
+        } else {
+            match self.mode {
+                CaptureMode::AutoDrmFirst | CaptureMode::FrameOnly => Source::Frame,
+                CaptureMode::HistogramOnly if histogram == HistogramHealth::Valid => {
+                    Source::Histogram
+                }
+                CaptureMode::HistogramOnly => Source::Hold,
+            }
         };
         Decision {
-            source: if use_histogram {
-                if histogram == HistogramHealth::Valid {
-                    Source::Histogram
-                } else {
-                    Source::Hold
-                }
-            } else {
-                Source::Frame
-            },
+            source,
             protected_latched: self.protected,
         }
     }
@@ -124,6 +140,15 @@ mod tests {
         assert_eq!(
             r.decide(PlaybackClass::Clear, HistogramHealth::NotReady, t)
                 .source,
+            Source::Hold
+        );
+        assert_eq!(
+            r.decide(
+                PlaybackClass::Clear,
+                HistogramHealth::NotReady,
+                t + Duration::from_secs(2)
+            )
+            .source,
             Source::Frame
         );
         r.decide(PlaybackClass::Protected, HistogramHealth::Valid, t);
@@ -167,4 +192,104 @@ mod tests {
             Source::Histogram
         );
     }
+    #[test]
+    fn unknown_startup_and_clear_stability_fail_closed() {
+        let mut r = DrmCaptureRouter::default();
+        let t = Instant::now();
+        for mode in [
+            CaptureMode::AutoDrmFirst,
+            CaptureMode::FrameOnly,
+            CaptureMode::HistogramOnly,
+        ] {
+            r.set_mode(mode);
+            assert_eq!(
+                r.decide(PlaybackClass::Unknown, HistogramHealth::NotReady, t)
+                    .source,
+                Source::Hold
+            );
+        }
+        r.set_mode(CaptureMode::AutoDrmFirst);
+        assert_eq!(
+            r.decide(PlaybackClass::Clear, HistogramHealth::NotReady, t)
+                .source,
+            Source::Hold
+        );
+        assert_eq!(
+            r.decide(
+                PlaybackClass::Clear,
+                HistogramHealth::NotReady,
+                t + Duration::from_millis(1999)
+            )
+            .source,
+            Source::Hold
+        );
+        assert_eq!(
+            r.decide(
+                PlaybackClass::Clear,
+                HistogramHealth::NotReady,
+                t + Duration::from_secs(2)
+            )
+            .source,
+            Source::Frame
+        );
+        // A lost classification immediately revokes the Frame route.
+        assert_eq!(
+            r.decide(
+                PlaybackClass::Unknown,
+                HistogramHealth::NotReady,
+                t + Duration::from_secs(3)
+            )
+            .source,
+            Source::Hold
+        );
+        assert_eq!(
+            r.decide(
+                PlaybackClass::Clear,
+                HistogramHealth::NotReady,
+                t + Duration::from_secs(4)
+            )
+            .source,
+            Source::Hold
+        );
+    }
+
+    #[test]
+    fn frame_only_cannot_override_protected_latch() {
+        let mut r = DrmCaptureRouter::default();
+        r.set_mode(CaptureMode::FrameOnly);
+        let t = Instant::now();
+        assert_eq!(
+            r.decide(PlaybackClass::Protected, HistogramHealth::Valid, t)
+                .source,
+            Source::Hold
+        );
+        assert_eq!(
+            r.decide(
+                PlaybackClass::Unknown,
+                HistogramHealth::Valid,
+                t + Duration::from_secs(1)
+            )
+            .source,
+            Source::Hold
+        );
+        assert_eq!(
+            r.decide(
+                PlaybackClass::Clear,
+                HistogramHealth::Valid,
+                t + Duration::from_secs(2)
+            )
+            .source,
+            Source::Hold
+        );
+        assert_eq!(
+            r.decide(
+                PlaybackClass::Clear,
+                HistogramHealth::NotReady,
+                t + Duration::from_secs(4)
+            )
+            .source,
+            Source::Frame
+        );
+    }
+
 }
