@@ -112,6 +112,12 @@ enum Commands {
         #[arg(long)]
         acknowledge_native_capture: bool,
     },
+    /// Validate native descriptor ranges against /proc/self/maps, without pixel reads
+    TestFrameMapping {
+        /// Acknowledge one native frame-descriptor and VMA inspection
+        #[arg(long)]
+        acknowledge_native_capture: bool,
+    },
     /// Register/unregister a temporary private LS2 name without loading the VT capture driver
     TestLs2Registration {
         /// Explicitly acknowledge an active Luna bus registration attempt
@@ -178,6 +184,9 @@ async fn main() -> Result<()> {
         Commands::TestFrameDescriptor {
             acknowledge_native_capture,
         } => run_test_frame_descriptor(acknowledge_native_capture).await,
+        Commands::TestFrameMapping {
+            acknowledge_native_capture,
+        } => run_test_frame_mapping(acknowledge_native_capture).await,
         Commands::TestLs2Registration {
             acknowledge_luna_registration,
             capture_client,
@@ -2319,6 +2328,58 @@ mod c5_frame_descriptor_cli_tests {
         assert!(matches!(
             parsed.command,
             Commands::TestFrameDescriptor {
+                acknowledge_native_capture: true
+            }
+        ));
+    }
+}
+
+/// One live VMA inspection against an opaque vendor buffer descriptor.
+/// Reads only /proc/self/maps, not contents at the vendor-provided addresses.
+async fn run_test_frame_mapping(acknowledge_native_capture: bool) -> Result<()> {
+    if !acknowledge_native_capture {
+        return Err(anyhow!(
+            "test-frame-mapping requires --acknowledge-native-capture; native processing may acquire hardware"
+        ));
+    }
+    for sample in 1..=3 {
+        let class = capture::media::query().await;
+        if class != PlaybackClass::Clear {
+            return Err(anyhow!(
+                "FRAME_MAPPING_REFUSED: media sample {sample}/3 is {class:?}; Unknown/Protected never qualifies"
+            ));
+        }
+        if sample < 3 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+    info!("FRAME_MAPPING_CLEAR_GATE_PASS: 3/3 spaced Clear classifications");
+    VtCapture::probe_buffer_mappings_once()
+}
+
+#[cfg(test)]
+mod c5_frame_mapping_cli_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mapping_requires_explicit_acknowledgement() {
+        let error = run_test_frame_mapping(false)
+            .await
+            .expect_err("no native operation without opt in");
+        assert!(error.to_string().contains("--acknowledge-native-capture"));
+    }
+
+    #[test]
+    fn mapping_command_uses_distinct_subcommand() {
+        let parsed = Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-frame-mapping",
+            "--acknowledge-native-capture",
+        ])
+        .expect("parse mapping CLI");
+        assert!(matches!(
+            parsed.command,
+            Commands::TestFrameMapping {
                 acknowledge_native_capture: true
             }
         ));

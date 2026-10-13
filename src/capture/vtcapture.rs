@@ -369,10 +369,94 @@ fn validate_buffer_descriptor(
     })
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReadableSpan {
+    start: usize,
+    end: usize,
+}
+
+/// Interpret /proc/self/maps as a bounded, read-only VMA inventory. File
+/// names, absolute addresses and mapping identities are never logged.
+fn parse_readable_spans(maps: &str) -> Result<Vec<ReadableSpan>> {
+    let mut spans = Vec::new();
+    for line in maps.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split_whitespace();
+        let range = fields.next().ok_or_else(|| anyhow!("missing VMA range"))?;
+        let perms = fields.next().ok_or_else(|| anyhow!("missing VMA permissions"))?;
+        let (start, end) = range
+            .split_once('-')
+            .ok_or_else(|| anyhow!("malformed VMA address range"))?;
+        let start = usize::from_str_radix(start, 16)
+            .context("invalid VMA starting address")?;
+        let end = usize::from_str_radix(end, 16)
+            .context("invalid VMA ending address")?;
+        if start >= end {
+            return Err(anyhow!("invalid VMA address ordering"));
+        }
+        if perms.as_bytes().first() == Some(&b'r') {
+            spans.push(ReadableSpan { start, end });
+        }
+    }
+    spans.sort_unstable_by_key(|span| span.start);
+    Ok(spans)
+}
+
+/// Checking the address is arithmetic only: NEVER create a pointer slice or
+/// dereference the vendor-provided address. Adjacent readable VMAs may cover
+/// one buffer, but an unreadable gap fails closed.
+fn span_is_readable(addr: usize, size: usize, spans: &[ReadableSpan]) -> bool {
+    if addr == 0 || size == 0 {
+        return false;
+    }
+    let Some(end) = addr.checked_add(size) else {
+        return false;
+    };
+    let mut cursor = addr;
+    for span in spans {
+        if span.end <= cursor {
+            continue;
+        }
+        if span.start > cursor {
+            return false;
+        }
+        cursor = cursor.max(span.end);
+        if cursor >= end {
+            return true;
+        }
+    }
+    false
+}
+
+/// This proves only *reported mapping coverage at the time of inspection*.
+/// It does not prove the pages are resident, correctly owned, synchronized,
+/// DRM-clear, or safe for subsequent raw Rust pointer dereferencing.
+fn check_descriptor_readable_mappings(
+    descriptor: &LibVtCaptureBufferInfo,
+    summary: DescriptorSummary,
+    maps: &str,
+) -> Result<()> {
+    let spans = parse_readable_spans(maps)?;
+    let y_addr = descriptor.start_addr0 as usize;
+    let uv_addr = descriptor.start_addr1 as usize;
+    let y_end = y_addr.checked_add(summary.y_size).ok_or_else(|| anyhow!("Y range overflow"))?;
+    let uv_end = uv_addr.checked_add(summary.uv_size).ok_or_else(|| anyhow!("UV range overflow"))?;
+    if y_addr < uv_end && uv_addr < y_end {
+        return Err(anyhow!("native Y and UV descriptor ranges overlap"));
+    }
+    if !span_is_readable(y_addr, summary.y_size, &spans) {
+        return Err(anyhow!("native Y descriptor is not fully covered by readable mappings"));
+    }
+    if !span_is_readable(uv_addr, summary.uv_size, &spans) {
+        return Err(anyhow!("native UV descriptor is not fully covered by readable mappings"));
+    }
+    Ok(())
+}
+
 /**
  * One-shot native probe owner. Once preprocess has been attempted, even a
  * native error may have partially armed the scaler: attempt postprocess before
- * finalize and release. No 'process' or buffer API is ever called here.
+ * finalize and release. Only the selected explicit diagnostic may call process or descriptor APIs; no native buffer is ever dereferenced.
  */
 struct C5MetadataSession {
     driver: *mut c_void,
@@ -545,23 +629,36 @@ impl VtCapture {
     /// requests, pixel reads, output devices, or mode fallbacks are permitted.
     /// Call only after three fresh, positively Clear media classifications.
     pub fn probe_preprocess_metadata() -> Result<()> {
-        Self::probe_preprocess_once(false, false)
+        Self::probe_preprocess_once(false, false, false)
     }
 
     /// One native process invocation on a known-clear display-output source.
     /// No buffer metadata requests or pixel reads. Process MAY enable a stream.
     pub fn probe_process_no_buffers() -> Result<()> {
-        Self::probe_preprocess_once(true, false)
+        Self::probe_preprocess_once(true, false, false)
     }
 
     /// Exactly one request for the native buffer *descriptor*, not its bytes.
     /// The returned pointers are treated as opaque: never logged, copied or
     /// dereferenced. The source must have been independently verified Clear.
     pub fn probe_buffer_descriptor_once() -> Result<()> {
-        Self::probe_preprocess_once(true, true)
+        Self::probe_preprocess_once(true, true, false)
     }
 
-    fn probe_preprocess_once(process_once: bool, descriptor_once: bool) -> Result<()> {
+    /// Validate the Y and UV descriptor address ranges against readable VMAs
+    /// while the native capture session is alive. No pixel loads or copies.
+    pub fn probe_buffer_mappings_once() -> Result<()> {
+        Self::probe_preprocess_once(true, true, true)
+    }
+
+    fn probe_preprocess_once(
+        process_once: bool,
+        descriptor_once: bool,
+        mapping_once: bool,
+    ) -> Result<()> {
+        if mapping_once && (!process_once || !descriptor_once) {
+            return Err(anyhow!("mapping-only probe requires a processed descriptor"));
+        }
         let lib = unsafe { Library::new(LIBVTCAPTURE_PATH) }
             .context("unable to load LG VT library for metadata-only probe")?;
         let caller = CString::new("org.webosbrew.lg-hue-sync")?;
@@ -718,7 +815,13 @@ impl VtCapture {
                         }
                         .into());
                     }
-                    Some(validate_buffer_descriptor(&descriptor, layout)?)
+                    let validated = validate_buffer_descriptor(&descriptor, layout)?;
+                    if mapping_once {
+                        let maps = std::fs::read_to_string("/proc/self/maps")
+                            .context("cannot inspect own process VMA map")?;
+                        check_descriptor_readable_mappings(&descriptor, validated, &maps)?;
+                    }
+                    Some(validated)
                 } else {
                     None
                 };
@@ -729,12 +832,19 @@ impl VtCapture {
             match (operation, cleanup) {
                 (Ok(((width, height, stride), summary)), Ok(())) => {
                     if let Some(summary) = summary {
-                        info!(
-                            "C5_FRAME_DESCRIPTOR_PASS: display-output plane={}x{} stride={} y_present={} uv_present={} y_size={} uv_size={} descriptor_calls=1 frame_reads=0 clean_shutdown=true",
-                            width, height, stride,
-                            summary.y_present, summary.uv_present,
-                            summary.y_size, summary.uv_size
-                        );
+                        if mapping_once {
+                            info!(
+                                "C5_FRAME_MAPPING_PASS: display-output plane={}x{} stride={} y_size={} uv_size={} y_vma_readable=true uv_vma_readable=true descriptor_calls=1 frame_reads=0 clean_shutdown=true",
+                                width, height, stride, summary.y_size, summary.uv_size
+                            );
+                        } else {
+                            info!(
+                                "C5_FRAME_DESCRIPTOR_PASS: display-output plane={}x{} stride={} y_present={} uv_present={} y_size={} uv_size={} descriptor_calls=1 frame_reads=0 clean_shutdown=true",
+                                width, height, stride,
+                                summary.y_present, summary.uv_present,
+                                summary.y_size, summary.uv_size
+                            );
+                        }
                     } else if process_once {
                         info!(
                             "C5_FRAME_PROCESS_PASS: display-output plane={}x{} stride={} process_calls=1 frame_reads=0 clean_shutdown=true",
@@ -1368,6 +1478,43 @@ impl Drop for VtCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readable_maps_cover_only_contiguous_readable_intervals() {
+        let maps = "00001000-00002000 rw-p 00000000 00:00 0\n00002000-00003000 r--p 00000000 00:00 0\n00003000-00004000 -w-p 00000000 00:00 0\n00005000-00006000 r--p 00000000 00:00 0\n";
+        let spans = parse_readable_spans(maps).unwrap();
+        assert!(span_is_readable(0x1800, 0x1000, &spans));
+        assert!(!span_is_readable(0x2800, 0x1000, &spans));
+        assert!(!span_is_readable(0x3800, 0x100, &spans));
+        assert!(!span_is_readable(0x2800, 0x2800, &spans));
+        assert!(span_is_readable(0x5000, 0x1000, &spans));
+        assert!(!span_is_readable(0x5000, 0x1001, &spans));
+        assert!(!span_is_readable(usize::MAX - 2, 10, &spans));
+        assert!(parse_readable_spans("not-a-mapping rw-p").is_err());
+    }
+
+    #[test]
+    fn mapping_probe_checks_full_ranges_and_rejects_overlap_without_reading() {
+        let layout = DescriptorSummary {
+            y_present: true,
+            uv_present: true,
+            y_size: 0x1000,
+            uv_size: 0x800,
+        };
+        let maps = "00001000-00003000 rw-p 00000000 00:00 0\n00004000-00005000 r--p 00000000 00:00 0\n";
+        // Deliberately fake pointer values: no actual allocation exists.
+        let mut descriptor = LibVtCaptureBufferInfo {
+            start_addr0: 0x1800usize as *mut u8,
+            start_addr1: 0x4000usize as *mut u8,
+            size0: 0x1000,
+            size1: 0x800,
+        };
+        check_descriptor_readable_mappings(&descriptor, layout, maps).unwrap();
+        descriptor.start_addr1 = 0x2800usize as *mut u8;
+        assert!(check_descriptor_readable_mappings(&descriptor, layout, maps).is_err());
+        descriptor.start_addr1 = 0x5000usize as *mut u8;
+        assert!(check_descriptor_readable_mappings(&descriptor, layout, maps).is_err());
+    }
 
     #[test]
     fn buffer_descriptor_is_checked_as_opaque_metadata_only() {
