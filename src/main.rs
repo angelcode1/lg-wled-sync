@@ -710,7 +710,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     // 3. Initialize capture
     // Start without native capture. The media router must grant a stable Clear state first.
     let mut capture: Box<dyn ScreenCapture> = Box::new(MockCapture::new(
-        config.capture_width, config.capture_height,
+        config.capture_width,
+        config.capture_height,
     ));
     let mut color_pipeline = ColorPipeline::new(
         config.saturation_boost,
@@ -964,12 +965,19 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             // paused-management loop; never leave VT resources pinned.
             histogram_capture = None;
             using_histogram = false;
-            capture = Box::new(MockCapture::new(config.capture_width, config.capture_height));
-            shared_state.capture_hardware.store(false, Ordering::Relaxed);
+            capture = Box::new(MockCapture::new(
+                config.capture_width,
+                config.capture_height,
+            ));
+            shared_state
+                .capture_hardware
+                .store(false, Ordering::Relaxed);
             media_class = PlaybackClass::Unknown;
             drm_router = DrmCaptureRouter::default();
             drm_router.set_mode(config.capture_mode);
-            if let Some(task) = media_query.take() { task.abort(); }
+            if let Some(task) = media_query.take() {
+                task.abort();
+            }
             color_pipeline.reset();
             output_gate.clear();
             shared_state.capture_source.store(2, Ordering::Relaxed);
@@ -1442,8 +1450,13 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             media_class = PlaybackClass::Unknown;
             drm_router = DrmCaptureRouter::default();
             drm_router.set_mode(config.capture_mode);
-            if let Some(task) = media_query.take() { task.abort(); }
-            capture = Box::new(MockCapture::new(config.capture_width, config.capture_height));
+            if let Some(task) = media_query.take() {
+                task.abort();
+            }
+            capture = Box::new(MockCapture::new(
+                config.capture_width,
+                config.capture_height,
+            ));
             shared_state
                 .capture_hardware
                 .store(capture.is_real_hardware(), Ordering::Relaxed);
@@ -1558,8 +1571,13 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         let needs_histogram = route.source != Source::Frame;
         // Release VT frame ownership as soon as clear classification is lost.
         if needs_histogram && capture.is_real_hardware() {
-            capture = Box::new(MockCapture::new(config.capture_width, config.capture_height));
-            shared_state.capture_hardware.store(false, Ordering::Relaxed);
+            capture = Box::new(MockCapture::new(
+                config.capture_width,
+                config.capture_height,
+            ));
+            shared_state
+                .capture_hardware
+                .store(false, Ordering::Relaxed);
             color_pipeline.reset();
             output_gate.clear();
         }
@@ -1584,17 +1602,15 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             // histogram backend, but must never authorize sampling or output.
             // In particular, the C5's known stub fingerprint fails before
             // entering any native histogram implementation.
-            let histogram_candidate =
-                (media_class == PlaybackClass::Protected
-                    && config.capture_mode
-                        != capture::drm_routing::CaptureMode::FrameOnly)
-                    || (media_class == PlaybackClass::Clear
-                        && config.capture_mode
-                            == capture::drm_routing::CaptureMode::HistogramOnly);
+            let histogram_candidate = (media_class == PlaybackClass::Protected
+                && config.capture_mode != capture::drm_routing::CaptureMode::FrameOnly)
+                || (media_class == PlaybackClass::Clear
+                    && config.capture_mode == capture::drm_routing::CaptureMode::HistogramOnly);
             if !histogram_candidate && route.source == Source::Hold {
                 histogram_capture = None;
             }
-            if histogram_candidate && histogram_capture.is_none()
+            if histogram_candidate
+                && histogram_capture.is_none()
                 && last_histogram_attempt.elapsed() >= Duration::from_secs(3)
             {
                 last_histogram_attempt = tokio::time::Instant::now();
@@ -1610,12 +1626,12 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             if route.source == Source::Histogram {
                 if let Some(driver) = histogram_capture.as_mut() {
                     match driver.sample() {
-                    Ok(colors) => new_colors = Some(colors),
-                    Err(err) => {
-                        warn!("LG histogram read interrupted: {err:#}");
-                        histogram_capture = None;
-                        last_histogram_attempt = tokio::time::Instant::now();
-                    }
+                        Ok(colors) => new_colors = Some(colors),
+                        Err(err) => {
+                            warn!("LG histogram read interrupted: {err:#}");
+                            histogram_capture = None;
+                            last_histogram_attempt = tokio::time::Instant::now();
+                        }
                     }
                 }
             }
@@ -1852,7 +1868,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 }
 
                 // Route again after retry delay; never initialize from stale media state.
-                capture = Box::new(MockCapture::new(config.capture_width, config.capture_height));
+                capture = Box::new(MockCapture::new(
+                    config.capture_width,
+                    config.capture_height,
+                ));
                 shared_state
                     .capture_hardware
                     .store(capture.is_real_hardware(), Ordering::Relaxed);
@@ -2101,7 +2120,9 @@ async fn run_test_capture(config_path: PathBuf, raw_nv12_stats: bool) -> Result<
     }
     let mut capture = create_capture(config.capture_width, config.capture_height);
     if !capture.is_real_hardware() {
-        return Err(anyhow!("test-capture has no validated native frame source (mock capture is not TV data)"));
+        return Err(anyhow!(
+            "test-capture has no validated native frame source (mock capture is not TV data)"
+        ));
     }
     let mut sampler = ZoneSampler::new(
         config.zones.clone(),
