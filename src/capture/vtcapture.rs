@@ -169,6 +169,9 @@ macro_rules! frame_native {
         {
             let mut rc = 0 as c_int;
             let mut error = [0 as c_char; 256];
+            // This macro is invoked both inside and outside existing unsafe
+            // scopes. The local FFI boundary remains explicit in both cases.
+            #[allow(unused_unsafe)]
             let outcome = unsafe {
                 $guard($fn_ptr, $($arg,)* &mut rc, error.as_mut_ptr(), error.len())
             };
@@ -208,9 +211,9 @@ fn checked_plane_dimensions(plane: &LibVtCapturePlaneInfo) -> Result<(u32, u32, 
     if width > 4096
         || height > 2160
         || stride > 8192
-        || width % 2 != 0
-        || height % 2 != 0
-        || stride % 2 != 0
+        || !width.is_multiple_of(2)
+        || !height.is_multiple_of(2)
+        || !stride.is_multiple_of(2)
         || stride < width
     {
         return Err(anyhow!(
