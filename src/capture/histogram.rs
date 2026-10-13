@@ -37,6 +37,14 @@ fn is_known_stubbed_histogram_library(bytes: &[u8]) -> bool {
     openssl::sha::sha256(bytes) == C5_STUBBED_VT_HISTOGRAM_SHA256
 }
 
+// Safe fingerprint discriminator shared with the frame fallback policy.
+// No native code is invoked, and no vendor permission is modified.
+pub(crate) fn is_known_c5_vendor_elf() -> bool {
+    fs::read(DEVICE)
+        .map(|bytes| is_known_stubbed_histogram_library(&bytes))
+        .unwrap_or(false)
+}
+
 static REVOKED: AtomicBool = AtomicBool::new(false);
 extern "C" fn policy_revoked() -> bool {
     REVOKED.store(true, Ordering::SeqCst);
