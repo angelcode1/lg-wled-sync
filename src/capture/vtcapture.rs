@@ -322,7 +322,6 @@ fn central_nv12_stats(
     })
 }
 
-
 /**
  * One-shot metadata probe owner. Once preprocess has been attempted, even a
  * native error may have partially armed the scaler: attempt postprocess before
@@ -496,8 +495,7 @@ impl VtCapture {
         unsafe {
             let create: Symbol<FnVtCaptureCreate> = lib.get(b"vtCapture_create\0")?;
             let init: Symbol<FnVtCaptureInit> = lib.get(b"vtCapture_init\0")?;
-            let preprocess: Symbol<FnVtCapturePreprocess> =
-                lib.get(b"vtCapture_preprocess\0")?;
+            let preprocess: Symbol<FnVtCapturePreprocess> = lib.get(b"vtCapture_preprocess\0")?;
             let plane_info: Symbol<FnVtCapturePlaneInfo> = lib.get(b"vtCapture_planeInfo\0")?;
             let postprocess: Symbol<FnVtCapturePostprocess> =
                 lib.get(b"vtCapture_postprocess\0")?;

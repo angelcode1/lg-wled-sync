@@ -2180,7 +2180,9 @@ mod c5_frame_metadata_cli_tests {
 
     #[tokio::test]
     async fn metadata_command_requires_acknowledgement_before_native_access() {
-        let error = run_test_frame_metadata(false).await.expect_err("must refuse");
+        let error = run_test_frame_metadata(false)
+            .await
+            .expect_err("must refuse");
         assert!(error.to_string().contains("--acknowledge-native-capture"));
     }
 
