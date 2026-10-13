@@ -1,6 +1,6 @@
 # LG C5: registration-only Luna diagnostic (no capture)
 
-Status: **registration-only command successfully built and executed on the owner's C5 without an added role**. The TV explicitly rejected registration with `LSError -1027` (see below). The minimal role fixture is still **NOT installed**. The native histogram has not produced a sample. HDMI HDCP remains `Unknown`.
+Status: **registration-only Resource Manager name succeeds on the owner's C5 after the narrowly scoped development role was installed and scanned**. The earlier baseline rejected the same name family with `LSError -1027`. The native histogram has not produced a sample. HDMI HDCP remains `Unknown`.
 
 ## Purpose and provenance
 
@@ -184,6 +184,46 @@ ls-control scan-services
 A restart/reboot might be required on some OEM implementations before
 removal takes effect; do not assume a file removal instantly revokes
 an already loaded hub role. Do not remove any other security file.
+
+## 2026-10-13: post-role A/B result — Resource Manager registration now succeeds
+
+The owner **explicitly installed the two scoped development-policy
+files** and invoked `ls-control scan-services` on the rooted C5.
+The rescan printed:
+
+```text
+telling hub to reload setting and rescan all directories
+```
+
+Without replacing the executable, the repeated registration-only
+test printed:
+
+```text
+LS2_PROBE_ATTEMPT executable=/var/home/root/c5-histogram-probe name=com.webos.rm.client._lghuesyncprobe20872 private_bus=true capture=false
+LS2_PROBE_OK name=com.webos.rm.client._lghuesyncprobe20872 registered=true unregistered=true capture=false
+```
+
+**Confirmed controlled A/B:** before the newly installed role, the
+same executable was rejected with `-1027 Invalid permissions`;
+after the role was loaded, the matching Resource Manager name
+registered and unregistered successfully. Thus the narrowly scoped
+role **sufficed to resolve this registration blocker** on the
+tested TV. This is stronger than the earlier static ELF hypothesis.
+
+The exact `/var/luna-service2-dev` role and manifest now **exist
+on the owner's TV**. Do not reinstall them with create-only commands
+that abort if paths already exist. The step-1 registered name prefix
+is `com.webos.rm.client.*` only; the second
+`com.webos.service.capture.client*` registration is **not yet
+authorised or independently tested**. The result is not evidence that
+the native histogram device, capture permission service or protected
+HDMI sampling will work. No VT marker was created by the test.
+
+The next experiment should add a *separate registration-only test
+mode* to the **same Rust executable** using the native VT client
+name family and `LSRegister`, plus an optional, separately reviewed
+stage-2 regular role with only that additional registration name.
+Do not broaden outbound permissions or invoke `test-histogram`.
 
 ## Read-only C5 preflight (no registration)
 
