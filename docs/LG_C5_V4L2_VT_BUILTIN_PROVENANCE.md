@@ -483,3 +483,12 @@ authorized independently classified Clear playback,
 respect DRM/HDCP and use the existing safe cleanup
 sequence. Static source examination requires no
 capture experiment.
+
+## Open Source Edition GitHub route assessed
+
+The public [webosose GitHub organisation](https://github.com/webosose)
+is useful for shared userspace components but **not a verified source**
+for the C5's built-in `v4l2_vt` driver. OSE Raspberry Pi Linux
+6.1/6.6 recipes differ from the installed LG TV 5.4.268-324
+kernel. Read [the OSE source review](LG_C5_WEBOS_OSE_SOURCE_REVIEW.md)
+for checked repositories, URLs and search limits.
