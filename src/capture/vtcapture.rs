@@ -1200,6 +1200,13 @@ impl VtCapture {
             ));
         }
 
+        // The exact C5 vendor ELF exposes a V4L2 MMAP ring, but publishes
+        // the DQBUF index immediately before QBUF. Its current-buffer API
+        // does not give a CPU reader an ownership lease. Do not construct a
+        // long-lived capture object that would form Rust slices over buffers
+        // already returned to the driver. Metadata-only probes are separate.
+        super::histogram::guard_vt_frame_cpu_access()?;
+
         info!(
             "Loading webOS libvtcapture driver from {}...",
             LIBVTCAPTURE_PATH

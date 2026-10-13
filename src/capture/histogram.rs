@@ -45,6 +45,28 @@ pub(crate) fn is_known_c5_vendor_elf() -> bool {
         .unwrap_or(false)
 }
 
+/// VtDriver on this exact C5 publishes a DQBUF index and immediately QBUFs
+/// that same buffer from its worker thread. currentCaptureBuffInfo provides no
+/// consumer lease, so safe CPU image reads are not established. Do not use the
+/// legacy raw-pointer VtCapture frame loop for this fingerprint.
+fn require_vt_frame_cpu_access_abi(known_c5: bool) -> Result<()> {
+    if known_c5 {
+        bail!(
+            "C5 native frame CPU access blocked: V4L2 worker immediately requeues the published buffer; no proven frame lease or cache-coherency contract. Only opt-in zero-pixel diagnostics are permitted"
+        );
+    }
+    Ok(())
+}
+
+/// Fail closed if the on-device library cannot be fingerprinted. Other known
+/// LG families retain their existing capture path unchanged.
+pub(crate) fn guard_vt_frame_cpu_access() -> Result<()> {
+    let library = fs::read(DEVICE).with_context(|| {
+        format!("cannot fingerprint {DEVICE}; refusing native raw-frame capture")
+    })?;
+    require_vt_frame_cpu_access_abi(is_known_stubbed_histogram_library(&library))
+}
+
 static REVOKED: AtomicBool = AtomicBool::new(false);
 extern "C" fn policy_revoked() -> bool {
     REVOKED.store(true, Ordering::SeqCst);
@@ -608,6 +630,14 @@ mod tests {
         assert!(!is_known_stubbed_histogram_library(b""));
         assert!(!is_known_stubbed_histogram_library(b"not an LG ELF"));
         assert_eq!(C5_STUBBED_VT_HISTOGRAM_SHA256.len(), 32);
+    }
+
+    #[test]
+    fn c5_frame_cpu_access_requires_proven_ownership_contract() {
+        assert!(require_vt_frame_cpu_access_abi(false).is_ok());
+        let error = require_vt_frame_cpu_access_abi(true).unwrap_err();
+        assert!(error.to_string().contains("no proven frame lease"));
+        assert!(error.to_string().contains("blocked"));
     }
 
     #[test]
