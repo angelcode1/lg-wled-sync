@@ -683,45 +683,72 @@ proprietary vendor binaries into Git, grant broad LS2 roles, or restart
 the hub for this diagnostic. The capture service's DRM refusal policies
 must remain intact.
 
-## 2026-10-13: exact LSRegisterPubPriv exception found in UMS connector
+## 2026-10-13: offline verification corrects UMS exception attribution
 
-The owner searched the copied C5
-`~/Downloads/c5-native-libs/libums_connector.so.1` with a narrow
-`LSRegister` expression (no `head` truncation). The output includes:
+The owner reported `LSRegisterPubPriv FAILED` in a shell
+`gstrings` result apparently labelled `libums_connector.so.1`.
+We obtained and examined the subsequent private archive
+`c5-ums-registration-analysis.tar.gz`, which contains
+**`libums_connector.so.1`, exactly 30,044 bytes**, an ELF32 ARM
+EABI5 soft-float shared object. Its BuildID is
+`be924adbee8011018d7def541f1fe961aea0e547` and its SHA-256 is
+`d030887d54de9a1da8fc024a0550a22dcff1db1b4ebb55e9151475330e3e6261`.
 
-```text
-LSRegisterPubPriv
-LSRegister
-LSRegisterPalmService
-SERVICE_REGISTER_ERR
-LSRegisterPubPriv FAILED for name=%s !!
-LSRegisterPubPriv FAILED
-LSRegister FAILED for name=%s !!
-LSRegister FAILED
+**Correction of the preceding conclusion:** this specific,
+hash-identified binary has **no** literal `LSRegisterPubPriv FAILED`,
+no dynamic `LSRegisterPubPriv` import and no
+`LSRegister` import. Its dynamic `DT_NEEDED` entry includes
+`libums_connector_impl.so.1`; it imports
+`UMSConnector::UMSConnector_impl::UMSConnector_impl(...,
+UMSConnectorBusType, bool)`. In Thumb code,
+`UMSConnector::UMSConnector` at `0x358c` forwards the caller's
+bus-type parameter, name, loop and context into the
+implementation constructor at `0x3664` through the PLT at
+`0x3020`. These are real ELF code and relocation facts from the
+uploaded wrapper.
+
+The older, separately supplied
+`libresource_mgr_client.so.1.0.0` calls the public
+`UMSConnector` constructor from
+`ResourceManagerClientInit(UMSConnectorBusType)`:
+Thumb call at `0x69a0` into PLT `0x5590`, which resolves
+via GOT `0x26e78` to the constructor. The Resource Manager
+library constructs a generated `com.webos.rm.client.*` name.
+The bus type is a parameter forwarded by these constructors;
+the enumerated value in the failing on-TV invocation has
+**not** been established.
+
+Therefore the previously pasted exact error text is **not
+attributable to the hash-identified wrapper**. It may have come
+from `libums_connector_impl.so.1`, a different local copy of
+the same basename, or pasted output that did not correspond to
+the archive. **We need to verify the implementation binary
+before making that attribution.**
+
+Next read-only step: compare both local file hashes and check the
+implementation for exact error strings, then privately attach its
+binary (not to GitHub). No vendor service modification, permission
+grant or histogram restart is indicated.
+
+```bash
+mkdir -p ~/Downloads/c5-native-libs
+scp -O root@192.168.8.184:/usr/lib/libums_connector_impl.so.1 \
+  ~/Downloads/c5-native-libs/libums_connector_impl.so.1
+
+GSTRINGS="$(brew --prefix binutils)/bin/gstrings"
+for LIB in libums_connector.so.1 libums_connector_impl.so.1; do
+  P="$HOME/Downloads/c5-native-libs/$LIB"
+  echo "===== $LIB ====="
+  file "$P"
+  shasum -a 256 "$P"
+  "$GSTRINGS" -a "$P" \
+    | grep -F -C 2 'LSRegisterPubPriv FAILED' || true
+done
 ```
 
-This is the **first identified vendor library containing the exact
-observed exception text**, `LSRegisterPubPriv FAILED`. The
-`libresource_mgr_client.so.1` library imports the UMSConnector
-constructor, providing a plausible native call chain. The output
-does not reveal the failed name, registration bus, or decisive C++
-throw call site; a string's presence alone cannot prove that
-particular execution path was taken.
-
-The same UMS library also refers to
-`libums_connector_impl.so.1`. Because the exact error already
-occurs in the copied `libums_connector.so.1`, prioritise
-**its** exception cross-references and `LSRegisterPubPriv` call
-in offline ARM32/Thumb disassembly. Then determine the
-`UMSConnectorBusType` used by ResourceManagerClient. Avoid
-assigning `["all"]` or guessing LS2 roles.
-
-The last pasted `scp` for `libums_connector_impl.so.1` ended
-with a trailing backslash and no destination or successful-copy
-confirmation. Its copy status is unknown. The existing
-`libums_connector.so.1` alone is enough for the next offline step;
-privately attach it in this conversation rather than committing
-vendor files to GitHub. The C5 histogram and DRM paths remain untested.
+The C5's separate Luna role and native DRM/permission
+refusal still apply. No native histogram samples have been
+collected.
 
 ## Build and download
 
