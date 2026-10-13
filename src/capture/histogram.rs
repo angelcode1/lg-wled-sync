@@ -650,7 +650,10 @@ mod tests {
         let mut r = NativeHistogram::default();
         r.bins[0][254] = 65535;
         r.bins[0][255] = 1;
-        let count: u64 = r.bins[0].iter().map(|&population| u64::from(population)).sum();
+        let count: u64 = r.bins[0]
+            .iter()
+            .map(|&population| u64::from(population))
+            .sum();
         let weighted: u64 = r.bins[0]
             .iter()
             .enumerate()
