@@ -482,7 +482,9 @@ fn checked_central_offsets(
         .and_then(|v| v.checked_add(x & !1))
         .ok_or_else(|| anyhow!("UV sample offset overflow"))?;
     if y_offset >= summary.y_size
-        || uv_offset.checked_add(2).is_none_or(|end| end > summary.uv_size)
+        || uv_offset
+            .checked_add(2)
+            .is_none_or(|end| end > summary.uv_size)
     {
         return Err(anyhow!("3-byte probe sample outside reported plane bounds"));
     }
@@ -493,11 +495,7 @@ fn checked_central_offsets(
 /// No fallback to /proc/self/mem, direct slices, memcpy or unsafe read.
 #[cfg(target_os = "linux")]
 fn copy_self_via_kernel(addr: usize, dest: &mut [u8]) -> Result<()> {
-    if addr == 0
-        || dest.is_empty()
-        || dest.len() > 2
-        || addr.checked_add(dest.len()).is_none()
-    {
+    if addr == 0 || dest.is_empty() || dest.len() > 2 || addr.checked_add(dest.len()).is_none() {
         return Err(anyhow!("invalid kernel-copy sample request"));
     }
     let local = libc::iovec {
@@ -510,9 +508,7 @@ fn copy_self_via_kernel(addr: usize, dest: &mut [u8]) -> Result<()> {
         iov_base: addr as *mut c_void,
         iov_len: dest.len(),
     };
-    let copied = unsafe {
-        libc::process_vm_readv(libc::getpid(), &local, 1, &remote, 1, 0)
-    };
+    let copied = unsafe { libc::process_vm_readv(libc::getpid(), &local, 1, &remote, 1, 0) };
     if copied == dest.len() as isize {
         Ok(())
     } else {
@@ -775,7 +771,9 @@ impl VtCapture {
             ));
         }
         if sample_once && !mapping_once {
-            return Err(anyhow!("bounded sample requires readable mapping validation"));
+            return Err(anyhow!(
+                "bounded sample requires readable mapping validation"
+            ));
         }
         let lib = unsafe { Library::new(LIBVTCAPTURE_PATH) }
             .context("unable to load LG VT library for metadata-only probe")?;
