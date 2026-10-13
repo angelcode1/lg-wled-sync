@@ -859,6 +859,27 @@ whitelisting, video-permission checks or protected-HDMI capture.
 Keep secure/scrambled video refusal intact and HDMI DRM state
 `Unknown`.
 
+## Registration-only diagnostic implementation (2026-10-13)
+
+An executable-path-matched, **opt-in LS2 registration-only** diagnostic
+has now been added to `src/ls2_probe.rs` and exposed as:
+
+```bash
+lg-hue-sync test-ls2-registration --acknowledge-luna-registration
+```
+
+It does **not** initialise native video capture or create the
+`vt_devmode` marker. The proposed regular role is staged, **not
+installed**, at `security/c5-registration-only/`. Do not use
+the legacy broad `scripts/provision_luna.sh` on C5.
+For the exact preflight, output interpretation, owner-controlled
+role-review procedure and rollback considerations, see
+[LG_C5_LS2_REGISTRATION_ONLY.md](LG_C5_LS2_REGISTRATION_ONLY.md).
+
+No registration-only result has been observed on the TV yet.
+The earlier histogram failure still remains unresolved until
+the hub's `LSError` can be captured.
+
 ## Build and download
 
 GitHub Actions on the `feature/vendor-neutral-wled-drm-first` branch runs
