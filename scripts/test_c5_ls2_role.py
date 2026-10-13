@@ -34,6 +34,37 @@ class C5Ls2RoleTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, serialized)
 
+    def test_stage2_does_not_expand_outbound_permissions(self):
+        baseline = json.loads((BASE / "role.json").read_text())
+        role = json.loads((BASE / "stage2-role.json").read_text())
+        self.assertEqual(role["type"], "regular")
+        self.assertEqual(role["exeName"], baseline["exeName"])
+        self.assertEqual(
+            role["allowedNames"],
+            ["com.webos.rm.client.*", "com.webos.service.capture.client*"],
+        )
+        self.assertEqual(
+            role["permissions"],
+            [
+                baseline["permissions"][0],
+                {
+                    "service": "com.webos.service.capture.client*",
+                    "outbound": [],
+                },
+            ],
+        )
+        for item in role["permissions"]:
+            self.assertNotIn("inbound", item)
+        serialized = json.dumps(role)
+        for forbidden in (
+            '"privileged"',
+            '"all"',
+            '"capturepermission.security"',
+            '"com.webos.service.capturepermission"',
+            '"outbound": ["*"]',
+        ):
+            self.assertNotIn(forbidden, serialized)
+
     def test_manifest_installs_only_one_dev_role(self):
         manifest = json.loads((BASE / "manifest.json").read_text())
         self.assertEqual(
