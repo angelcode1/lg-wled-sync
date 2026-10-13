@@ -880,6 +880,101 @@ No registration-only result has been observed on the TV yet.
 The earlier histogram failure still remains unresolved until
 the hub's `LSError` can be captured.
 
+## 2026-10-13: native histogram returns NULL; installed ELF's histogram API is stubbed
+
+The owner's latest *bounded* two-sample C5 run (following two
+successful registration-only A/B tests) reported:
+
+```text
+Initializing LG native histogram for 2 samples, 400ms interval; no light output
+Error: LG histogram init failed; do not start competing capture or change system flags
+Caused by:
+    LG rejected histogram initialization (capture busy or denied?)
+HISTOGRAM_TEST_EXIT=1
+MARKER_ABSENT
+```
+
+This is **not** another `LSRegisterPubPriv FAILED` exception; the C++
+init guard returned a **null native handle**, and marker cleanup
+succeeded. The app's old `capture busy or denied?` wording is
+generic and did not reveal a permission denial.
+
+### Definitive offline disassembly of the owner-supplied vendor ELF
+
+The previous uploaded C5 binary,
+`libvtcapture.so.1.0.0`, has:
+
+- SHA-256:
+  `6483fc0b82a9da6f65e11e85f9dc43bb163de80fe2c3c84b84afa251b0f6892c`
+- GNU BuildID:
+  `9fb5e56d59c29ed242c0e4a66015c71601a4657e`
+
+The **exported**
+`VtHistogram::initHistogram()` at Thumb address
+`0x12c18` is just:
+
+```asm
+12c18: movs r0, #7
+12c1a: bx   lr
+```
+
+This is an **unconditional return of numeric status 7**, rather
+than an initialization routine. No significance should be attributed
+to the enum number without the vendor ABI header.
+
+The ELF vtable relocations independently connect that implementation
+to the `VtHistogram` object:
+
+```text
+0002f630 R_ARM_ABS32 00012c19 _ZN11VtHistogram13initHistogramEv
+```
+
+The wrapper `vtCapture_initHistogram` at `0x19f9c` constructs
+`VtHistogram` via PLT `0x9cdc`, loads the virtual method at
+vtable offset `+8` (Thumb `0x1a2c6`–`0x1a2ce`),
+calls it, tests the result at `0x1a2d0`, and on **nonzero**
+branches at `0x1a2d2` to `0x1a406`, which destroys the
+object and clears its handle. Normal completion returns that now-null
+handle at `0x1a34e`.
+
+The second histogram virtual method
+`VtHistogram::getHistogram(_LibVtHistogram*)` at `0x12fe0`
+likewise does **not read or write the output histogram record**.
+It tests `isActivate()` and returns **1** if active, or **2**
+if inactive. The 16-region histogram data path in this exact ELF
+is consequently **not implemented**, even if some other API could
+activate the object. It is incorrect to infer this is fixable by
+adding capture outbound permissions or app whitelisting.
+
+This conclusion applies to the **exact copied ELF**, not to all
+C5 firmware builds or every possible independent TV metadata
+source. On-device checksum should be reconfirmed read-only before
+attributing a new TV revision to this binary:
+
+```sh
+ssh root@192.168.8.184 \
+  'sha256sum /usr/lib/libvtcapture.so.1.0.0; readlink -f /usr/lib/libvtcapture.so.1'
+```
+
+### Fail-closed application guard
+
+Source commit `8206c17dcc55bb3e4ea9441365e18dbcd7f4fe6f`
+checks this exact library SHA-256 before
+`HistogramCapture::try_new` creates `vt_devmode` or invokes
+LG native VT functions. On a match it emits a precise
+`LG C5 native histogram unavailable ... stubbed VtHistogram API`
+message and does **not** attempt hardware initialization.
+Other builds are not blocked by this one fingerprint.
+
+**Do not run the same native histogram test again on this exact
+library or weaken LS2/capture permissions.** The successfully
+installed stage-two role should be retained only as the separately
+audited, diagnostic-only policy for the current executable path.
+Alternative *unprotected-content* capture APIs or external
+non-DRM methods require their own analysis and tests.
+No protected-HDMI capability has been established, and native
+secure/scrambled-video refusals must remain untouched.
+
 ## Build and download
 
 GitHub Actions on the `feature/vendor-neutral-wled-drm-first` branch runs
