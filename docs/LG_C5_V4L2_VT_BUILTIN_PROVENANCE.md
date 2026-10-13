@@ -287,3 +287,89 @@ TV
 
 This reads version metadata only, no video device, no kernel
 memory, no vendor marker, and no identifying secrets.
+
+## 2026-10-13: exact installed firmware/version confirmed
+
+The owner read only allowlisted `/var/run/nyx/os_info.json` fields:
+
+| Field | Verified TV value |
+|---|---|
+| `webos_build_id` | `2901` |
+| `core_os_kernel_version` | `5.4.268-324` |
+| `webos_manufacturing_version` | **`33.00.71`** |
+| `webos_release` | `10.0.0` |
+| `webos_release_platformcode` | `10` |
+
+Together with prior `nyx-cmd DeviceInfo query device_name=o22n3`,
+`lge,lg1213`, `lge,lg1k`, and model
+`OLED42C5PSA.AAUQLJD`, this completes a strong non-unique
+source-release fingerprint. No serial number, hardware MAC,
+device ID or kernel pointer is required.
+
+### Exact source package status — unresolved
+
+A targeted public lookup using `OLED42C5PSA`, `O22N3`,
+`33.00.71`, `5.4.268-324` and `HE_DTV_W25G_AFABATAA`
+did **not verify an actual downloadable LG kernel-source
+archive** matching this installed build, nor the source of the
+built-in `v4l2_vt` driver. This is a *search limitation*, not
+proof that LG has not published the package. The official LG
+TV open-source product catalog is dynamically populated and
+is not reliably indexable in static web searches:
+
+https://opensource.lge.com/product/list?ctgr=005&subCtgr=006
+
+The related `HE_DTV_W25G_AFABATAA` identifier is a
+family-level correlation from an independent C5 firmware
+extraction note; the installed TV did not itself return
+that value in the allowlisted fields. Mark it as **candidate
+family**, not an independently verified firmware file name.
+
+Public C5 support pages may list later firmware releases;
+do **not** upgrade the TV to align with a source archive.
+The task is to identify source for the **installed 33.00.71**
+release, preserving the current rooted system and
+`v4l2_vt` hardware behavior.
+
+### LG Open Source inquiry — ready-to-send request
+
+LG's official inquiry form has an
+`Open Source License and Open Source Code used in our
+product` category:
+
+https://opensource.lge.com/inquiry
+
+Suggested message:
+
+> I am seeking the corresponding open-source code package for my
+> LG OLED42C5PSA.AAUQLJD television, installed firmware
+> 33.00.71 (webOS 10.0.0, build 2901), Linux kernel
+> 5.4.268-324, ARM64 platform O22N3 (device-tree
+> compatibles lge,lg1213 and lge,lg1k).
+>
+> Please identify the download/OSS notice and source package
+> corresponding to this exact installed firmware release,
+> including the Linux kernel source, LG modifications and
+> applicable build configuration. In particular, could you
+> confirm whether the built-in platform V4L2 capture driver
+> `v4l2_vt` is covered by the disclosed package? The live
+> kernel exposes `v4l2_vt_vidioc_reqbufs`,
+> `v4l2_vt_vidioc_dqbuf`,
+> `v4l2_vt_vidioc_expbuf`, and
+> `vt_capture_thread`; I would appreciate the corresponding
+> driver-source file paths if they are included.
+>
+> If `v4l2_vt` is excluded from the OSS package, please
+> clarify its licensing/disclosure status and point me to
+> any released headers or documentation for the buffer
+> lifetime and cache-coherency contract.
+>
+> I am requesting source-code identification, not firmware
+> upgrade or product troubleshooting support.
+
+**Audit completion gate:** Until actual source files and their
+build lineage have been verified, do not claim a `v4l2_vt`
+source implementation has been reviewed. Do not test a new
+V4L2 queue owner, DMABUF export, DMA mapping, or direct pixel
+read based solely on the presence of exported symbol names.
+Continue retaining the exact-C5 fail-closed raw-pixel guard.
