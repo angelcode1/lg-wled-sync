@@ -70,23 +70,95 @@ type FnVtCaptureRelease = unsafe extern "C" fn(*mut c_void) -> c_int;
 // typed noexcept C++ barrier. No vendor C++ exception crosses Rust FFI.
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
-    fn lg_frame_guard_create(f: FnVtCaptureCreate, out: *mut *mut c_void, err: *mut c_char, cap: usize) -> c_int;
-    fn lg_frame_guard_init(f: FnVtCaptureInit, driver: *mut c_void, caller: *const c_char, client: *mut c_char, rc: *mut c_int, err: *mut c_char, cap: usize) -> c_int;
-    fn lg_frame_guard_preprocess(f: FnVtCapturePreprocess, driver: *mut c_void, client: *const c_char, props: *const LibVtCaptureProperties, rc: *mut c_int, err: *mut c_char, cap: usize) -> c_int;
-    fn lg_frame_guard_plane_info(f: FnVtCapturePlaneInfo, driver: *mut c_void, client: *const c_char, plane: *mut LibVtCapturePlaneInfo, rc: *mut c_int, err: *mut c_char, cap: usize) -> c_int;
-    fn lg_frame_guard_process(f: FnVtCaptureProcess, driver: *mut c_void, client: *const c_char, rc: *mut c_int, err: *mut c_char, cap: usize) -> c_int;
-    fn lg_frame_guard_current_buffer(f: FnVtCaptureCurrentCaptureBuffInfo, driver: *mut c_void, buffer: *mut LibVtCaptureBufferInfo, rc: *mut c_int, err: *mut c_char, cap: usize) -> c_int;
-    fn lg_frame_guard_stop(f: FnVtCaptureStop, driver: *mut c_void, client: *const c_char, rc: *mut c_int, err: *mut c_char, cap: usize) -> c_int;
-    fn lg_frame_guard_postprocess(f: FnVtCapturePostprocess, driver: *mut c_void, client: *const c_char, rc: *mut c_int, err: *mut c_char, cap: usize) -> c_int;
-    fn lg_frame_guard_finalize(f: FnVtCaptureFinalize, driver: *mut c_void, client: *const c_char, rc: *mut c_int, err: *mut c_char, cap: usize) -> c_int;
-    fn lg_frame_guard_release(f: FnVtCaptureRelease, driver: *mut c_void, rc: *mut c_int, err: *mut c_char, cap: usize) -> c_int;
+    fn lg_frame_guard_create(
+        f: FnVtCaptureCreate,
+        out: *mut *mut c_void,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_init(
+        f: FnVtCaptureInit,
+        driver: *mut c_void,
+        caller: *const c_char,
+        client: *mut c_char,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_preprocess(
+        f: FnVtCapturePreprocess,
+        driver: *mut c_void,
+        client: *const c_char,
+        props: *const LibVtCaptureProperties,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_plane_info(
+        f: FnVtCapturePlaneInfo,
+        driver: *mut c_void,
+        client: *const c_char,
+        plane: *mut LibVtCapturePlaneInfo,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_process(
+        f: FnVtCaptureProcess,
+        driver: *mut c_void,
+        client: *const c_char,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_current_buffer(
+        f: FnVtCaptureCurrentCaptureBuffInfo,
+        driver: *mut c_void,
+        buffer: *mut LibVtCaptureBufferInfo,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_stop(
+        f: FnVtCaptureStop,
+        driver: *mut c_void,
+        client: *const c_char,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_postprocess(
+        f: FnVtCapturePostprocess,
+        driver: *mut c_void,
+        client: *const c_char,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_finalize(
+        f: FnVtCaptureFinalize,
+        driver: *mut c_void,
+        client: *const c_char,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn lg_frame_guard_release(
+        f: FnVtCaptureRelease,
+        driver: *mut c_void,
+        rc: *mut c_int,
+        err: *mut c_char,
+        cap: usize,
+    ) -> c_int;
 }
 
 #[cfg(target_os = "linux")]
 fn frame_guard_check(operation: &str, boundary: c_int, error: &[c_char; 256]) -> Result<()> {
     if boundary != 0 {
         let message = unsafe { CStr::from_ptr(error.as_ptr()) }.to_string_lossy();
-        return Err(anyhow!("LG C++ frame operation {operation} threw or was rejected by guard: {message}"));
+        return Err(anyhow!(
+            "LG C++ frame operation {operation} threw or was rejected by guard: {message}"
+        ));
     }
     Ok(())
 }
@@ -124,7 +196,6 @@ unsafe fn frame_create(f: FnVtCaptureCreate) -> Result<*mut c_void> {
     }
 }
 
-
 // Reject malformed or oversized metadata before native buffer pointers are dereferenced.
 // A valid C5 layout must be established independently of our requested resolution.
 fn checked_plane_dimensions(plane: &LibVtCapturePlaneInfo) -> Result<(u32, u32, u32)> {
@@ -134,11 +205,17 @@ fn checked_plane_dimensions(plane: &LibVtCapturePlaneInfo) -> Result<(u32, u32, 
     let width = plane.plane_w as u32;
     let height = plane.plane_h as u32;
     let stride = plane.stride as u32;
-    if width > 4096 || height > 2160 || stride > 8192
-        || width % 2 != 0 || height % 2 != 0
-        || stride % 2 != 0 || stride < width
+    if width > 4096
+        || height > 2160
+        || stride > 8192
+        || width % 2 != 0
+        || height % 2 != 0
+        || stride % 2 != 0
+        || stride < width
     {
-        return Err(anyhow!("LG frame plane exceeds bounded NV12 geometry or is misaligned"));
+        return Err(anyhow!(
+            "LG frame plane exceeds bounded NV12 geometry or is misaligned"
+        ));
     }
     nv12_lengths(width, height, stride)?;
     Ok((width, height, stride))
@@ -301,8 +378,14 @@ impl VtCapture {
             client_id[1] = b'0';
             let caller_id = CString::new("org.webosbrew.lg-hue-sync")?;
 
-            let ret_init = match frame_native!(lg_frame_guard_init, "init",
-                *fn_init, driver, caller_id.as_ptr(), client_id.as_mut_ptr() as *mut c_char) {
+            let ret_init = match frame_native!(
+                lg_frame_guard_init,
+                "init",
+                *fn_init,
+                driver,
+                caller_id.as_ptr(),
+                client_id.as_mut_ptr() as *mut c_char
+            ) {
                 Ok(rc) => rc,
                 Err(err) => {
                     let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
@@ -349,50 +432,94 @@ impl VtCapture {
                 buf_cnt: 3,
                 frm: 60,
             };
-            let ret_pre = match frame_native!(lg_frame_guard_preprocess, "preprocess",
-                *fn_preprocess, driver, client_ptr, &props) {
+            let ret_pre = match frame_native!(
+                lg_frame_guard_preprocess,
+                "preprocess",
+                *fn_preprocess,
+                driver,
+                client_ptr,
+                &props
+            ) {
                 Ok(rc) => rc,
                 Err(err) => {
-                    let _ = frame_native!(lg_frame_guard_finalize, "finalize", *fn_finalize, driver, client_ptr);
+                    let _ = frame_native!(
+                        lg_frame_guard_finalize,
+                        "finalize",
+                        *fn_finalize,
+                        driver,
+                        client_ptr
+                    );
                     let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
                     return Err(err);
                 }
             };
             if ret_pre != 0 {
-                let _ = frame_native!(lg_frame_guard_finalize, "finalize", *fn_finalize, driver, client_ptr);
+                let _ = frame_native!(
+                    lg_frame_guard_finalize,
+                    "finalize",
+                    *fn_finalize,
+                    driver,
+                    client_ptr
+                );
                 let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
                 return Err(NativeCaptureError {
                     backend: "libvtcapture",
                     operation: "vtCapture_preprocess",
                     code: ret_pre,
-                }.into());
+                }
+                .into());
             }
             info!("vtCapture_preprocess completed for selected display-output mode");
 
             // 4. Query plane layout and hardware stride
             let mut plane_info = LibVtCapturePlaneInfo::default();
-            let ret_plane = match frame_native!(lg_frame_guard_plane_info, "plane-info",
-                *fn_plane_info, driver, client_ptr, &mut plane_info) {
+            let ret_plane = match frame_native!(
+                lg_frame_guard_plane_info,
+                "plane-info",
+                *fn_plane_info,
+                driver,
+                client_ptr,
+                &mut plane_info
+            ) {
                 Ok(rc) => rc,
                 Err(err) => {
-                    let _ = frame_native!(lg_frame_guard_finalize, "finalize", *fn_finalize, driver, client_ptr);
+                    let _ = frame_native!(
+                        lg_frame_guard_finalize,
+                        "finalize",
+                        *fn_finalize,
+                        driver,
+                        client_ptr
+                    );
                     let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
                     return Err(err);
                 }
             };
             if ret_plane != 0 {
-                let _ = frame_native!(lg_frame_guard_finalize, "finalize", *fn_finalize, driver, client_ptr);
+                let _ = frame_native!(
+                    lg_frame_guard_finalize,
+                    "finalize",
+                    *fn_finalize,
+                    driver,
+                    client_ptr
+                );
                 let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
                 return Err(NativeCaptureError {
                     backend: "libvtcapture",
                     operation: "vtCapture_planeInfo",
                     code: ret_plane,
-                }.into());
+                }
+                .into());
             }
             let (width, height, stride) = match checked_plane_dimensions(&plane_info) {
                 Ok(layout) => layout,
                 Err(error) => {
-                    let _ = frame_native!(lg_frame_guard_finalize, "finalize", *fn_finalize, driver, client_ptr);
+                    let _ = frame_native!(
+                        lg_frame_guard_finalize,
+                        "finalize",
+                        *fn_finalize,
+                        driver,
+                        client_ptr
+                    );
                     let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
                     return Err(error);
                 }
@@ -401,7 +528,13 @@ impl VtCapture {
             let rgb_size = match nv12_lengths(width, height, stride) {
                 Ok((_, _, size)) => size,
                 Err(error) => {
-                    let _ = frame_native!(lg_frame_guard_finalize, "finalize", *fn_finalize, driver, client_ptr);
+                    let _ = frame_native!(
+                        lg_frame_guard_finalize,
+                        "finalize",
+                        *fn_finalize,
+                        driver,
+                        client_ptr
+                    );
                     let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
                     return Err(error);
                 }
@@ -419,21 +552,51 @@ impl VtCapture {
             );
 
             // 5. Start streaming capture process
-            let ret_proc = match frame_native!(lg_frame_guard_process, "process",
-                *fn_process, driver, client_ptr) {
+            let ret_proc = match frame_native!(
+                lg_frame_guard_process,
+                "process",
+                *fn_process,
+                driver,
+                client_ptr
+            ) {
                 Ok(rc) => rc,
                 Err(err) => {
-                    let _ = frame_native!(lg_frame_guard_stop, "stop", *fn_stop, driver, client_ptr);
-                    let _ = frame_native!(lg_frame_guard_postprocess, "postprocess", *fn_postprocess, driver, client_ptr);
-                    let _ = frame_native!(lg_frame_guard_finalize, "finalize", *fn_finalize, driver, client_ptr);
+                    let _ =
+                        frame_native!(lg_frame_guard_stop, "stop", *fn_stop, driver, client_ptr);
+                    let _ = frame_native!(
+                        lg_frame_guard_postprocess,
+                        "postprocess",
+                        *fn_postprocess,
+                        driver,
+                        client_ptr
+                    );
+                    let _ = frame_native!(
+                        lg_frame_guard_finalize,
+                        "finalize",
+                        *fn_finalize,
+                        driver,
+                        client_ptr
+                    );
                     let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
                     return Err(err);
                 }
             };
             if ret_proc != 0 {
                 let _ = frame_native!(lg_frame_guard_stop, "stop", *fn_stop, driver, client_ptr);
-                let _ = frame_native!(lg_frame_guard_postprocess, "postprocess", *fn_postprocess, driver, client_ptr);
-                let _ = frame_native!(lg_frame_guard_finalize, "finalize", *fn_finalize, driver, client_ptr);
+                let _ = frame_native!(
+                    lg_frame_guard_postprocess,
+                    "postprocess",
+                    *fn_postprocess,
+                    driver,
+                    client_ptr
+                );
+                let _ = frame_native!(
+                    lg_frame_guard_finalize,
+                    "finalize",
+                    *fn_finalize,
+                    driver,
+                    client_ptr
+                );
                 let _ = frame_native!(lg_frame_guard_release, "release", *fn_release, driver);
                 return Err(anyhow!("vtCapture_process failed with code {}", ret_proc));
             }
@@ -470,11 +633,31 @@ impl VtCapture {
         unsafe {
             let client_ptr = self.client_id.as_ptr() as *const c_char;
             for result in [
-                frame_native!(lg_frame_guard_stop, "stop", self.fn_stop, self.driver, client_ptr),
-                frame_native!(lg_frame_guard_postprocess, "postprocess", self.fn_postprocess, self.driver, client_ptr),
-                frame_native!(lg_frame_guard_finalize, "finalize", self.fn_finalize, self.driver, client_ptr),
+                frame_native!(
+                    lg_frame_guard_stop,
+                    "stop",
+                    self.fn_stop,
+                    self.driver,
+                    client_ptr
+                ),
+                frame_native!(
+                    lg_frame_guard_postprocess,
+                    "postprocess",
+                    self.fn_postprocess,
+                    self.driver,
+                    client_ptr
+                ),
+                frame_native!(
+                    lg_frame_guard_finalize,
+                    "finalize",
+                    self.fn_finalize,
+                    self.driver,
+                    client_ptr
+                ),
             ] {
-                if let Err(error) = result { warn!("LG capture cleanup: {error:#}"); }
+                if let Err(error) = result {
+                    warn!("LG capture cleanup: {error:#}");
+                }
             }
             self.is_stopped = true;
         }
@@ -598,8 +781,13 @@ impl ScreenCapture for VtCapture {
             size1: 0,
         };
 
-        let ret = frame_native!(lg_frame_guard_current_buffer, "current-buffer",
-            self.fn_current_buff_info, self.driver, &mut buf_info)?;
+        let ret = frame_native!(
+            lg_frame_guard_current_buffer,
+            "current-buffer",
+            self.fn_current_buff_info,
+            self.driver,
+            &mut buf_info
+        )?;
         if ret != 0 || buf_info.start_addr0.is_null() {
             return Err(CaptureError::Unavailable(NativeCaptureError {
                 backend: "libvtcapture",
@@ -697,11 +885,34 @@ impl Drop for VtCapture {
             if !self.driver.is_null() {
                 let client_ptr = self.client_id.as_ptr() as *const c_char;
                 if !self.is_stopped {
-                    let _ = frame_native!(lg_frame_guard_stop, "stop", self.fn_stop, self.driver, client_ptr);
-                    let _ = frame_native!(lg_frame_guard_postprocess, "postprocess", self.fn_postprocess, self.driver, client_ptr);
-                    let _ = frame_native!(lg_frame_guard_finalize, "finalize", self.fn_finalize, self.driver, client_ptr);
+                    let _ = frame_native!(
+                        lg_frame_guard_stop,
+                        "stop",
+                        self.fn_stop,
+                        self.driver,
+                        client_ptr
+                    );
+                    let _ = frame_native!(
+                        lg_frame_guard_postprocess,
+                        "postprocess",
+                        self.fn_postprocess,
+                        self.driver,
+                        client_ptr
+                    );
+                    let _ = frame_native!(
+                        lg_frame_guard_finalize,
+                        "finalize",
+                        self.fn_finalize,
+                        self.driver,
+                        client_ptr
+                    );
                 }
-                let _ = frame_native!(lg_frame_guard_release, "release", self.fn_release, self.driver);
+                let _ = frame_native!(
+                    lg_frame_guard_release,
+                    "release",
+                    self.fn_release,
+                    self.driver
+                );
                 self.driver = std::ptr::null_mut();
             }
         }
