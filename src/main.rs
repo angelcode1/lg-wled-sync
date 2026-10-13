@@ -1580,7 +1580,21 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 last_histogram_valid = None;
                 info!("DRM-first source selected: LG histogram; releasing frame capture");
             }
-            if route.source == Source::Histogram && histogram_capture.is_none()
+            // A Hold decision may authorize attempting the separate
+            // histogram backend, but must never authorize sampling or output.
+            // In particular, the C5's known stub fingerprint fails before
+            // entering any native histogram implementation.
+            let histogram_candidate =
+                (media_class == PlaybackClass::Protected
+                    && config.capture_mode
+                        != capture::drm_routing::CaptureMode::FrameOnly)
+                    || (media_class == PlaybackClass::Clear
+                        && config.capture_mode
+                            == capture::drm_routing::CaptureMode::HistogramOnly);
+            if !histogram_candidate && route.source == Source::Hold {
+                histogram_capture = None;
+            }
+            if histogram_candidate && histogram_capture.is_none()
                 && last_histogram_attempt.elapsed() >= Duration::from_secs(3)
             {
                 last_histogram_attempt = tokio::time::Instant::now();
@@ -1593,13 +1607,15 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 }
             }
             let mut new_colors = None;
-            if let Some(driver) = histogram_capture.as_mut() {
-                match driver.sample() {
+            if route.source == Source::Histogram {
+                if let Some(driver) = histogram_capture.as_mut() {
+                    match driver.sample() {
                     Ok(colors) => new_colors = Some(colors),
                     Err(err) => {
                         warn!("LG histogram read interrupted: {err:#}");
                         histogram_capture = None;
                         last_histogram_attempt = tokio::time::Instant::now();
+                    }
                     }
                 }
             }
