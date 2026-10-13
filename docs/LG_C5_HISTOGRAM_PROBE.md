@@ -714,9 +714,9 @@ The older, separately supplied
 Thumb call at `0x69a0` into PLT `0x5590`, which resolves
 via GOT `0x26e78` to the constructor. The Resource Manager
 library constructs a generated `com.webos.rm.client.*` name.
-The bus type is a parameter forwarded by these constructors;
-the enumerated value in the failing on-TV invocation has
-**not** been established.
+The bus type is forwarded by these constructors. Later offline
+analysis of the default ResourceManagerClient call path (below)
+shows that the native histogram path supplies numeric bus enum **0**.
 
 Therefore the previously pasted exact error text is **not
 attributable to the hash-identified wrapper**. It may have come
@@ -749,6 +749,115 @@ done
 The C5's separate Luna role and native DRM/permission
 refusal still apply. No native histogram samples have been
 collected.
+
+## 2026-10-13: exact C5 UMS registration-failure branch confirmed offline
+
+Private uploaded `c5-ums-impl-analysis.tar.gz` contains the ARM32
+`libums_connector_impl.so.1` (79,256 bytes; symlink target on TV
+`/usr/lib/libums_connector_impl.so.1.0.0`).
+
+- SHA-256:
+  `5cb6421805371cf36202b3840c3b07af5cef013979156f198a93c700b6971d0f`
+- ELF BuildID:
+  `4fd4913b63cb8fb30503145b959e28d0f62a0b8a`
+
+Used `readelf -Wr` to resolve imported symbol names against the
+**actual GOT addresses** and decoded Thumb-v7 constructor branches
+with `llvm-objdump`. Important ARM PLT pitfall: a nonstandard
+4-byte stub around `0x6158` shifts later entries; simply assigning
+successive 12-byte PLT slots **misidentifies** the function.
+The actual `LSRegisterPubPriv` GOT slot is `0x22e58`, reached from
+PLT `0x6168`.
+
+### Call path and enum value
+
+Verified in the owner's C5 vendor binaries:
+
+1. `libvtcapture.so.1.0.0`'
+   `ResourceManagerClient::init` allocates the
+   `uMediaServer::ResourceManagerClient` and calls its **default
+   constructor** through PLT `0x9bbc` (resolved to the
+   `uMediaServer::ResourceManagerClientC1Ev` symbol).
+2. The default constructor in
+   `libresource_mgr_client.so.1.0.0` at `0x6c4c` explicitly
+   sets `r1 = 0` at `0x6d8a`, then calls
+   `ResourceManagerClientInit(UMSConnectorBusType)`
+   through PLT `0x552c` at `0x6dce`.
+3. `ResourceManagerClientInit` saves this enum and passes it
+   into the `UMSConnector` constructor through PLT `0x5590`
+   at `0x69a0`, supplying a newly constructed
+   `com.webos.rm.client.*` name (random suffix).
+4. The public `libums_connector.so.1` wrapper forwards the
+   arguments to `UMSConnector_impl`. The latter constructor is at
+   `0x81f8` in `libums_connector_impl.so.1`.
+5. In the implementation constructor, at `0x85b2` it checks
+   enum `2`, at `0x85ba` enum `3`. For enum **0**, it takes
+   the `LSRegisterPubPriv` branch with its third argument `0`
+   at `0x85d8`. Enum `2` and enum `3` take separate
+   PalmService and `LSRegister` paths, respectively.
+   These are **numeric ABI values**, not externally verified
+   enum label names.
+
+### Exact error construction
+
+The return value from `LSRegisterPubPriv` is tested at
+`0x85e0`. A false result branches at `0x85e2` to
+`0x9514`, the failing registration's cleanup/error block.
+The literal `LSRegisterPubPriv FAILED` resides at
+`0x108f4`. A PC-relative literal at `0x997c`
+resolves from `0x959c` to that exact string; the code at
+`0x959e` constructs `std::runtime_error` from it,
+and `0x95ae` invokes `__cxa_throw`.
+
+This is a **direct static match** to the TV's observed exception:
+
+```text
+terminate called after throwing an instance of 'std::runtime_error'
+  what(): LSRegisterPubPriv FAILED
+```
+
+The implementation also holds
+`LSRegisterPubPriv FAILED for name=%s !!` at `0x108cc`,
+but the original crash output did **not** include a formatted name
+or hub `LSError` details. The generated name family is
+`com.webos.rm.client.*`; the one specific generated suffix was
+not recorded. Do **not** claim a precise hub rejection reason.
+Role/path mismatch remains a strong **hypothesis**, not a
+directly captured `ls-hubd` verdict.
+
+### Implication: distinct LS2 names, independent checks
+
+The existing LG capture testsuite role grants two registrations:
+`com.webos.rm.client.*` for the Resource Manager, and
+`com.webos.service.capture.client*` for the VT
+capture LS2 client. Its `exeName` is
+`/usr/bin/vtCaptureTestSuite`. The system
+`captureservice` role is also executable-specific.
+Neither applies by path to
+`/var/home/root/c5-histogram-probe`.
+
+**Safer next engineering step (not deployed):** define an
+application-specific regular LS2 role for the exact **stable installed
+binary path**, allowing only the two verified dynamic registration
+families. Start with outbound
+`com.webos.media` for `com.webos.rm.client.*`, and
+explicitly enumerate other destinations observed from
+`libvtcapture` for the capture client rather than copying
+LG's test-suite `outbound:["*"]`. Do not add
+`capturepermission.security` or `["all"]` to the new
+client without a separate permissions audit.
+
+Before the next native histogram run, prefer a tiny
+**registration-only** diagnostic for the Resource Manager identity
+that prints `LSError` and then unregisters. It must neither
+touch `vt_devmode` nor initialise VT capture. Its exact
+executable path/role installation mechanism must be validated first;
+the TV has **not** run such a test yet.
+
+Any success only verifies LS2 registration, **not** native
+whitelisting, video-permission checks or protected-HDMI capture.
+Keep secure/scrambled video refusal intact and HDMI DRM state
+`Unknown`.
 
 ## Build and download
 
