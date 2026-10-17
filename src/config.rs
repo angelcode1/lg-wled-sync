@@ -388,6 +388,14 @@ impl Config {
                 reason: "capture dimensions must fit within 4096 per side and 4K pixels",
             });
         }
+        if self.blended_capture_enabled
+            && (self.capture_width > 640 || self.capture_height > 360)
+        {
+            return Err(ConfigError::Invalid {
+                path: path.to_path_buf(),
+                reason: "BLENDED capture dimensions must be within 640x360",
+            });
+        }
         if !self.histogram.validate() {
             return Err(ConfigError::Invalid {
                 path: path.to_path_buf(),
