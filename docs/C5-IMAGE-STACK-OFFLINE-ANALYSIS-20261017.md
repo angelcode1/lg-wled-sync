@@ -64,3 +64,35 @@ TV response from `luna://com.webos.service.capture/getCapability` with `{}`: `{"
 The shipped `/usr/sbin/captureservice` ELF has dynamic symbol `CaptureProperties::processGetCapability(LSHandle*, LSMessage*, void*)` at Thumb address `0x1d65d`, size **4 bytes**. Offline Thumb disassembly of the same user-provided ELF shows a branch at `0x1d65c` directly to `CaptureProperties::processGetClipRegions` at `0x1d530`. The `processGetProperties`, `processGetOptions`, and several related read-only handlers also branch into this same implementation. Therefore an empty success response is not surprising, and repeatedly calling `getCapability` cannot establish what images are actually available.
 
 The ELF contains explicit `permissionClient` and `forceCaptureClient` parsers and references `/etc/palm/whitelist-conf.json` and `/home/root/whitelist-conf.json`. Inspect the existing files **read-only**; do not add clients or override roles. Avoid sharing unrelated configuration or device identifiers from these files.
+
+## C5 live capture whitelist (read-only; 2026-10-17)
+
+The actual `/etc/palm/whitelist-conf.json` contains:
+
+- `permissionClient`: `com.webos.service.capturepermission`, `com.webos.service.legacybroadcast.cipermission`, `com.webos.service.legacybroadcast.dvrpermission`.
+- `forceCaptureClient`: **empty**.
+- No filename containing `capture`, `compositor`, or `surface` appeared in listings of `/var/luna-service2/{roles.d,manifests.d,client-permissions.d}`.
+
+**Interpretation:** `permissionClient` is used by the capture service's `PermissionData::isValidAppClient` check to gate **permission-management calls**. It must **not** be misinterpreted as the exhaustive list of consumers permitted to take screenshots. `forceCaptureClient` being empty provides no vendor-listed blanket force-capture clients; it says nothing about ordinary authorized per-pipeline captures. File-name matching is also insufficient to rule out role/manifest entries inside generically named files.
+
+The extracted `captureservice` ELF explicitly implements `PermissionManager::processCheckPermission`, `processSetPermission`, `PermissionData::isValidAppClient`, a separate `PermissionService`, `getCurrentPipelineId` and `getCurrentVideoMuteState`. Permission-aware capture may be dependent on **current video pipeline and mute state**. Do not call `setPermission` or add entries to the whitelist.
+
+### Next evidence: metadata only, no capture attempt
+
+Inspect which service registry and manifest files refer to the capture services. Return **only matching filenames** to avoid exposing unrelated service role details:
+
+```sh
+ssh root@TV_IP 'sh -s' <<'SH'
+echo "===== CAPTURE SERVICE REGISTRY REFERENCES ====="
+for d in /var/luna-service2 /usr/share/luna-service2 /etc/palm/services /usr/share/dbus-1/services; do
+  [ -d "$d" ] || continue
+  grep -RIlE 'com[.]webos[.]service[.]capture(permission)?' "$d" 2>/dev/null | head -80
+done
+echo "===== CAPTURE SERVICE BINARY / APP PROCESSES ====="
+ps | grep -Ei 'captureservice|capturepermission|compositor|surface-manager' | grep -v grep || true
+echo "===== CAPTURE SERVICE FILES ====="
+find /etc/palm /usr/share/luna-service2 /var/luna-service2 -maxdepth 4 -type f \( -iname '*capture*' -o -iname '*screen*' \) -print 2>/dev/null | head -80
+SH
+```
+
+The `getCapability` success response is not proof of screenshot access and must not change Rust DRM/capture policy.
