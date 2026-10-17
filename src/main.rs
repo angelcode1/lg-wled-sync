@@ -773,7 +773,14 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut wled_outputs = Vec::new();
     if config.wled_sync_enabled {
         for device in config.wled_devices.iter().filter(|d| d.enabled) {
-            match WledUdpStreamer::new(&device.ip, device.udp_port, device.led_count) {
+            match WledUdpStreamer::new_configured(
+                &device.ip,
+                if device.udp_port == crate::output::wled::DEFAULT_PORT && device.protocol == crate::output::wled::WledProtocol::Ddp { crate::output::wled::DDP_PORT } else { device.udp_port },
+                device.led_count,
+                device.protocol,
+                device.color_mode,
+                device.white_mix,
+            ) {
                 Ok(transport) => {
                     let sampler = PerimeterSampler::new(
                         device.led_count,
