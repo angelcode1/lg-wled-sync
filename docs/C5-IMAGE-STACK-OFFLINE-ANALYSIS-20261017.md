@@ -138,21 +138,26 @@ On 2026-10-17 the owner supplied all 11 requested configuration files in a priva
 
 ### Minimal next TV collection (read-only)
 
-Run on Mac; replace `TV_IP`, check the contents before sharing:
+Collect only the LG built-in lighting and live-pick binaries and their matching LS2 policy declarations. Run on Mac; replace `TV_IP` and inspect the archive before upload:
 
-```sh
+```bash
 TV=TV_IP
 OUT="$HOME/Downloads/c5-lighting-service-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$OUT"
 ssh "root@$TV" 'sh -s' <<'SH' | tar -xf - -C "$OUT"
-for f in /usr/sbin/lightingcontroller /usr/sbin/livepick; do
+cd / || exit 1
+{
+  for f in usr/sbin/lightingcontroller usr/sbin/livepick; do
     [ -f "$f" ] && printf '%s\n' "$f"
-done
-for d in /usr/share/luna-service2/manifests.d /usr/share/luna-service2/client-permissions.d /usr/share/luna-service2/api-permissions.d /usr/share/luna-service2/groups.d /usr/share/luna-service2/roles.d /usr/share/luna-service2/services.d; do
+  done
+  for d in usr/share/luna-service2/manifests.d usr/share/luna-service2/client-permissions.d usr/share/luna-service2/api-permissions.d usr/share/luna-service2/groups.d usr/share/luna-service2/roles.d usr/share/luna-service2/services.d; do
     [ -d "$d" ] || continue
     find "$d" -maxdepth 1 -type f \( -iname '*lightingcontroller*' -o -iname '*livepick*' \) -print
-done
+  done
+} | sort -u | tar -cf - -T - 2>/dev/null
 SH
+(cd "$OUT" && zip -qry "$OUT.zip" .)
+echo "$OUT.zip"
 ```
 
-The example above intentionally enumerates paths only: copying binaries requires a second tar pass over the enumerated paths, and metadata-only listing must not be confused with collection of those files. Prefer the inline complete collection command in the chat response.
+The command reads files only, never invokes either binary, and does not start capture or alter LS2 policy. A role permitting outbound access is not necessarily proof that capture frames can be retrieved from a daemon running under our own identity.
