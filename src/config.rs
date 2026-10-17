@@ -218,6 +218,9 @@ pub struct Config {
     /// Auto prefers LG histogram for detected secure video, frame capture otherwise.
     #[serde(default)]
     pub capture_mode: crate::capture::drm_routing::CaptureMode,
+    /// Opt-in C5 LG BLENDED screenshot backend. Never used for Unknown/Protected.
+    #[serde(default)]
+    pub blended_capture_enabled: bool,
     /// Histogram spatial calibration; unknown TVs use uniform average by default.
     #[serde(default)]
     pub histogram: crate::capture::histogram::HistogramSettings,
@@ -426,6 +429,7 @@ impl Config {
             wled_sync_enabled: true,
             wled_devices: Vec::new(),
             capture_mode: crate::capture::drm_routing::CaptureMode::AutoDrmFirst,
+            blended_capture_enabled: false,
             histogram: crate::capture::histogram::HistogramSettings::default(),
             fps: default_fps(),
             brightness_multiplier: default_brightness(),
