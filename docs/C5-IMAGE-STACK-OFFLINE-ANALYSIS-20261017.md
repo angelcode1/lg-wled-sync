@@ -112,3 +112,47 @@ Present relevant files:
 - `services.d/com.webos.service.capture.service`
 
 The existence of these files shows **where** registered API groups/client permissions and service roles are defined; **their contents have not been inspected yet**, so it is premature to infer that the Rust daemon is authorized to call one-shot capture. The `lightingcontroller` and `livepick` names are leads only. No permission-management calls, whitelisting, role changes, or image capture have been performed.
+
+## Capture service policy bundle: verified C5 LS2 permissions
+
+On 2026-10-17 the owner supplied all 11 requested configuration files in a private ZIP. These facts are directly verified against parsed JSON from that ZIP:
+
+- `screen-capture-webos.manifest.json` points to its native executable role, test-suite role, API permissions, groups, client permissions and D-Bus service entry.
+- `com.webos.service.capture.service` launches `/usr/sbin/captureservice`, providing both `com.webos.service.capture` and `com.webos.service.capturepermission`.
+- `com.webos.service.capture.groups.json` declares **two non-public API groups**, `capture.client` and `capturepermission.security`.
+- `capture.client` lists **15** methods: `createHandle`, `destroyHandle`, `getClipRegions`, `getOptions`, `getProperties`, `isLocked`, `lock`, `setClipRegions`, `setOptions`, `setOutput`, `setProperties`, `unlock`, `getCapability`, `execute`, `executeOneShot`.
+- `capturepermission.security` exclusively covers `com.webos.service.capturepermission/checkPermission` and `setPermission`. **Neither may be called by the Rust daemon** for an ambient-light capture experiment; permission management is not a preflight entitlement workaround.
+- `com.webos.service.capture.role.json` identifies the service binary itself and the private names the service may register, not authorization for arbitrary third-party applications.
+- `com.webos.service.capture.perm.json` grants the capture service's own names `all` groups; it is **not** a grant to `org.webosbrew.lg-hue-sync` or any process run from a root SSH shell.
+- `com.webos.service.lightingcontroller.role.json`: the built-in `/usr/sbin/lightingcontroller` can register `com.webos.service.capture.client*` and has wildcard outbound permission under that name; it also uses the media service. This is a **strong lead** for finding a vendor-provided lighting/video integration, but does not establish that its stream is safe, continuous or usable by another service.
+- `com.webos.service.livepick.role.json` lists `com.webos.service.capture` as an outbound target for `com.webos.service.livepick` and `.req`. It is a different privileged consumer, and does not authorize impersonation.
+- `com.webos.service.capture.testsuite.role.json` contains broad test-suite privileges. Do not execute the test suite: it can perform real captures and manage capture buffers.
+- The large `compat.api.json` lists `com.webos.surfacemanager/captureCompositorOutput` in **private** but has no general public grant for this capture service. API names alone do not establish frame access.
+
+### Implications for our Rust code
+
+1. **No automatic `execute` or `executeOneShot` calls.** Capture service may implement direct video path, and returns only an ACK for `getCapability` on this build. Only a known-authorized clear test source and a legitimate registration role can justify future controlled capture evaluation.
+2. **Do not provision wildcard Luna names or privileges.** The historical `scripts/provision_luna.sh` used privileged roles, `all` client permissions and service-name matches including `com.webos.service.capturepermission`; it has now been replaced by a fail-closed warning in the development branch. It was not run against the TV and no TV role was modified.
+3. **Lightcontroller is the next static reference.** Inspect its real binary, own manifest, group and client-permission files, service dependency paths, and method usage OFFLINE. Registration identity and permissions cannot be borrowed by our daemon.
+4. **Do not infer an authorization grant from `luna-send` as root.** The daemon's actual executable/service identity and effective LS2 client groups must be verified separately. Preserve the current protected/unknown blackout policy.
+
+### Minimal next TV collection (read-only)
+
+Run on Mac; replace `TV_IP`, check the contents before sharing:
+
+```sh
+TV=TV_IP
+OUT="$HOME/Downloads/c5-lighting-service-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$OUT"
+ssh "root@$TV" 'sh -s' <<'SH' | tar -xf - -C "$OUT"
+for f in /usr/sbin/lightingcontroller /usr/sbin/livepick; do
+    [ -f "$f" ] && printf '%s\n' "$f"
+done
+for d in /usr/share/luna-service2/manifests.d /usr/share/luna-service2/client-permissions.d /usr/share/luna-service2/api-permissions.d /usr/share/luna-service2/groups.d /usr/share/luna-service2/roles.d /usr/share/luna-service2/services.d; do
+    [ -d "$d" ] || continue
+    find "$d" -maxdepth 1 -type f \( -iname '*lightingcontroller*' -o -iname '*livepick*' \) -print
+done
+SH
+```
+
+The example above intentionally enumerates paths only: copying binaries requires a second tar pass over the enumerated paths, and metadata-only listing must not be confused with collection of those files. Prefer the inline complete collection command in the chat response.
