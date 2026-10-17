@@ -175,7 +175,7 @@ It includes exported functions `_vtCaptureCreateHandleEx`, `_vtCaptureCreateHand
 A **static Thumb instruction-level review** of `_vtCaptureCurrentCaptureBuffInfo(unsigned char*)` (`0x15e44`, 304 bytes) shows:
 
 - It checks that the returned first two YUV plane pointers are non-null.
-- It requires first plane size `0xc00` (3072 bytes) and second `0x600` (1536 bytes). These match **64×48 planar YUV420** (not a full-size frame).
+- It requires first plane size `0xc00` (3072 bytes) and second `0x600` (1536 bytes). These match **64×48, two-plane YUV420 semi-planar (NV12-like) payload sizes** (not a full-size frame); byte counts alone do not establish channel ordering.
 - It calls `csc_YUV420toRGB` with dimensions **64 × 48** and then `kMeansClustering` with first argument **13**.
 - This proves an explicit **low-resolution capture → YUV/RGB conversion → clustered colour calculation** path in LG's code. The first argument `13` denotes a parameter of the clustering routine; it is **not proof of 13 external LEDs or display zones**.
 - The low-level routine still consumes `vtCapture_currentCaptureBuffInfo` pointers. It **does not establish a stable buffer lease, DMA cache-coherency guarantee, or LS2 entitlement** for our Rust process. Never remove the exact-C5 buffer guard just because vendor code references these pointers.
