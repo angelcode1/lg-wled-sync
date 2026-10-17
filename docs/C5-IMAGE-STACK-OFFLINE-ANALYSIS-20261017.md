@@ -96,3 +96,19 @@ SH
 ```
 
 The `getCapability` success response is not proof of screenshot access and must not change Rust DRM/capture policy.
+
+## Follow-up C5 Luna registry discovery
+
+The TV's active service declarations are located in **`/usr/share/luna-service2`**, not `/var/luna-service2`; the earlier filename-only query in `/var` did not discover these files. In the live TV output, `captureservice` (PID 4729 at the time) and `surface-manager` (PID 2259) were running.
+
+Present relevant files:
+
+- `api-permissions.d/com.webos.service.capture.api.json` and `api-permissions.d/compat.api.json`
+- `client-permissions.d/com.webos.service.capture.perm.json`
+- `groups.d/com.webos.service.capture.groups.json`
+- `manifests.d/screen-capture-webos.manifest.json`
+- `roles.d/com.webos.service.capture.role.json` and `roles.d/com.webos.service.capture.testsuite.role.json`
+- `roles.d/com.webos.service.lightingcontroller.role.json` and `roles.d/com.webos.service.livepick.role.json`
+- `services.d/com.webos.service.capture.service`
+
+The existence of these files shows **where** registered API groups/client permissions and service roles are defined; **their contents have not been inspected yet**, so it is premature to infer that the Rust daemon is authorized to call one-shot capture. The `lightingcontroller` and `livepick` names are leads only. No permission-management calls, whitelisting, role changes, or image capture have been performed.
