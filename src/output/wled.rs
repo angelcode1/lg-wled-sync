@@ -85,14 +85,22 @@ pub fn encode_packets_configured(
     let mut packets = Vec::new();
     match protocol {
         WledProtocol::Realtime => {
-            let single_max = if channels == 3 { DRGB_LIMIT } else { DRGBW_LIMIT };
+            let single_max = if channels == 3 {
+                DRGB_LIMIT
+            } else {
+                DRGBW_LIMIT
+            };
             if colors.len() <= single_max {
                 let mut packet = Vec::with_capacity(2 + channels * colors.len());
                 packet.extend_from_slice(&[if channels == 3 { 2 } else { 3 }, TIMEOUT_SECS]);
                 append_pixels(&mut packet, colors, mode, white_mix);
                 packets.push(packet);
             } else {
-                let chunk = if channels == 3 { DNRGB_CHUNK } else { DNRGBW_CHUNK };
+                let chunk = if channels == 3 {
+                    DNRGB_CHUNK
+                } else {
+                    DNRGBW_CHUNK
+                };
                 let mut start = 0;
                 while start < colors.len() {
                     let end = (start + chunk).min(colors.len());
@@ -114,7 +122,11 @@ pub fn encode_packets_configured(
         }
         WledProtocol::Ddp => {
             let chunk = DDP_PAYLOAD_BYTES / channels;
-            let mut seq = if sequence == 0 { 1 } else { ((sequence - 1) % 15) + 1 };
+            let mut seq = if sequence == 0 {
+                1
+            } else {
+                ((sequence - 1) % 15) + 1
+            };
             let mut start = 0;
             while start < colors.len() {
                 let end = (start + chunk).min(colors.len());
@@ -158,7 +170,12 @@ pub struct WledUdpStreamer {
 impl WledUdpStreamer {
     pub fn new(host: &str, port: u16, count: usize) -> io::Result<Self> {
         Self::new_configured(
-            host, port, count, WledProtocol::Realtime, WledColorMode::Rgb, 1.0,
+            host,
+            port,
+            count,
+            WledProtocol::Realtime,
+            WledColorMode::Rgb,
+            1.0,
         )
     }
 
@@ -176,7 +193,10 @@ impl WledUdpStreamer {
             || !white_mix.is_finite()
             || !(0.0..=1.0).contains(&white_mix)
         {
-            return Err(Error::new(ErrorKind::InvalidInput, "invalid WLED parameters"));
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "invalid WLED parameters",
+            ));
         }
         let address = if host.contains(':') && !host.starts_with('[') {
             format!("[{host}]:{port}")
@@ -206,7 +226,11 @@ impl WledUdpStreamer {
     /// WLED maps its own configured LED geometry from the shared field;
     /// this never modifies or smooths the upstream colours.
     pub fn map_field(field: &ColorField, positions: &[Point], gain: f32) -> Vec<RgbColor> {
-        field.points(positions).into_iter().map(|c| c.scale(gain)).collect()
+        field
+            .points(positions)
+            .into_iter()
+            .map(|c| c.scale(gain))
+            .collect()
     }
     pub fn led_count(&self) -> usize {
         self.count
@@ -244,7 +268,11 @@ impl LightOutput for WledUdpStreamer {
                 Ok(_) => return Err(Error::new(ErrorKind::WriteZero, "short WLED datagram").into()),
                 Err(e) => return Err(e.into()),
             }
-            self.sequence = if self.sequence == 15 { 1 } else { self.sequence + 1 };
+            self.sequence = if self.sequence == 15 {
+                1
+            } else {
+                self.sequence + 1
+            };
         }
         Ok(())
     }
@@ -274,9 +302,23 @@ mod tests {
     fn rgbw_uses_minimum_component_extraction() {
         assert_eq!(rgbw(RgbColor::new(100, 70, 30), 1.0), [70, 40, 0, 30]);
         assert_eq!(rgbw(RgbColor::new(100, 70, 30), 0.0), [100, 70, 30, 0]);
-        let a = encode_packets_configured(&rgb(367), WledProtocol::Realtime, WledColorMode::Rgbw, 1.0, 1).unwrap();
+        let a = encode_packets_configured(
+            &rgb(367),
+            WledProtocol::Realtime,
+            WledColorMode::Rgbw,
+            1.0,
+            1,
+        )
+        .unwrap();
         assert_eq!(a[0][..6], [3, 2, 6, 3, 0, 6]);
-        let b = encode_packets_configured(&rgb(368), WledProtocol::Realtime, WledColorMode::Rgbw, 1.0, 1).unwrap();
+        let b = encode_packets_configured(
+            &rgb(368),
+            WledProtocol::Realtime,
+            WledColorMode::Rgbw,
+            1.0,
+            1,
+        )
+        .unwrap();
         assert_eq!(b.len(), 2);
         assert_eq!(&b[0][..4], &[5, 2, 0, 0]);
         assert_eq!(&b[1][..4], &[5, 2, 1, 104]);
@@ -284,7 +326,9 @@ mod tests {
 
     #[test]
     fn ddp_frame_offsets_push_and_sequence() {
-        let packets = encode_packets_configured(&rgb(481), WledProtocol::Ddp, WledColorMode::Rgb, 1.0, 15).unwrap();
+        let packets =
+            encode_packets_configured(&rgb(481), WledProtocol::Ddp, WledColorMode::Rgb, 1.0, 15)
+                .unwrap();
         assert_eq!(packets.len(), 2);
         assert_eq!(&packets[0][..10], &[0x40, 15, 0x0b, 1, 0, 0, 0, 0, 5, 160]);
         assert_eq!(&packets[1][..10], &[0x41, 1, 0x0b, 1, 0, 0, 5, 160, 0, 3]);
@@ -294,7 +338,9 @@ mod tests {
 
     #[test]
     fn ddp_rgbw_uses_channel_offsets() {
-        let packets = encode_packets_configured(&rgb(361), WledProtocol::Ddp, WledColorMode::Rgbw, 1.0, 1).unwrap();
+        let packets =
+            encode_packets_configured(&rgb(361), WledProtocol::Ddp, WledColorMode::Rgbw, 1.0, 1)
+                .unwrap();
         assert_eq!(&packets[0][..10], &[0x40, 1, 0x1b, 1, 0, 0, 0, 0, 5, 160]);
         assert_eq!(&packets[1][..10], &[0x41, 2, 0x1b, 1, 0, 0, 5, 160, 0, 4]);
     }
@@ -303,8 +349,22 @@ mod tests {
     fn rejects_invalid_parameters() {
         assert!(encode_packets(&[]).is_err());
         assert!(encode_packets(&rgb(65537)).is_err());
-        assert!(encode_packets_configured(&rgb(2), WledProtocol::Ddp, WledColorMode::Rgbw, f32::NAN, 1).is_err());
-        assert!(encode_packets_configured(&rgb(2), WledProtocol::Ddp, WledColorMode::Rgbw, 1.01, 1).is_err());
+        assert!(encode_packets_configured(
+            &rgb(2),
+            WledProtocol::Ddp,
+            WledColorMode::Rgbw,
+            f32::NAN,
+            1
+        )
+        .is_err());
+        assert!(encode_packets_configured(
+            &rgb(2),
+            WledProtocol::Ddp,
+            WledColorMode::Rgbw,
+            1.01,
+            1
+        )
+        .is_err());
         assert_eq!(default_port(WledProtocol::Realtime), 21324);
         assert_eq!(default_port(WledProtocol::Ddp), 4048);
     }
