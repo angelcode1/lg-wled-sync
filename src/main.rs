@@ -790,7 +790,13 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         for device in config.wled_devices.iter().filter(|d| d.enabled) {
             match WledUdpStreamer::new_configured(
                 &device.ip,
-                if device.udp_port == crate::output::wled::DEFAULT_PORT && device.protocol == crate::output::wled::WledProtocol::Ddp { crate::output::wled::DDP_PORT } else { device.udp_port },
+                if device.udp_port == crate::output::wled::DEFAULT_PORT
+                    && device.protocol == crate::output::wled::WledProtocol::Ddp
+                {
+                    crate::output::wled::DDP_PORT
+                } else {
+                    device.udp_port
+                },
                 device.led_count,
                 device.protocol,
                 device.color_mode,
@@ -853,7 +859,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut media_query: Option<tokio::task::JoinHandle<PlaybackClass>> = None;
     // One in-flight screenshot maximum. No captures while source class is
     // Unknown/Protected or sync is paused, stopped, or being reconfigured.
-    let mut blended_request: Option<tokio::task::JoinHandle<Result<capture::blended::BlendedFrame>>> = None;
+    let mut blended_request: Option<
+        tokio::task::JoinHandle<Result<capture::blended::BlendedFrame>>,
+    > = None;
     let mut last_blended_valid: Option<std::time::Instant> = None;
     let mut blended_black_sent = false;
     let mut model_query: Option<tokio::task::JoinHandle<Option<String>>> = None;
@@ -1874,7 +1882,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             histogram_black_sent = false;
             last_histogram_valid = None;
             capture = if config.blended_capture_enabled {
-                Box::new(MockCapture::new(config.capture_width, config.capture_height))
+                Box::new(MockCapture::new(
+                    config.capture_width,
+                    config.capture_height,
+                ))
             } else {
                 create_capture(config.capture_width, config.capture_height)
             };
@@ -1887,7 +1898,6 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
         shared_state.capture_source.store(0, Ordering::Relaxed);
 
-
         // The C5 BLENDED path is an opt-in, LG-managed screenshot producer.
         // It never opens /dev/video60, and does not share the unsafe VT buffer
         // pointers. An active, freshly classified Clear route is mandatory.
@@ -1898,16 +1908,21 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     config.capture_height,
                 ));
             }
-            if blended_request.as_ref().is_some_and(|task| task.is_finished()) {
+            if blended_request
+                .as_ref()
+                .is_some_and(|task| task.is_finished())
+            {
                 let completed = blended_request.take().expect("checked above");
                 match completed.await {
                     Ok(Ok(frame)) if frame.finished.elapsed() <= Duration::from_millis(500) => {
-                        match color_pipeline.frame(&frame.pixels, frame.width, frame.height, false) {
+                        match color_pipeline.frame(&frame.pixels, frame.width, frame.height, false)
+                        {
                             Ok(field) => {
                                 last_blended_valid = Some(frame.finished);
                                 blended_black_sent = false;
                                 shared_state.capture_hardware.store(true, Ordering::Relaxed);
-                                let settings = shared_state.current_settings.read().unwrap().clone();
+                                let settings =
+                                    shared_state.current_settings.read().unwrap().clone();
                                 let mut fanout = OutputFanout {
                                     field: &field,
                                     config: &config,
@@ -1941,12 +1956,13 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
             // Treat an unavailable or stale screenshot just like an absent
             // native sample: black every vendor after at most 500ms.
-            if last_blended_valid
-                .is_none_or(|t| t.elapsed() > Duration::from_millis(500))
+            if last_blended_valid.is_none_or(|t| t.elapsed() > Duration::from_millis(500))
                 && !blended_black_sent
             {
                 blended_black_sent = true;
-                shared_state.capture_hardware.store(false, Ordering::Relaxed);
+                shared_state
+                    .capture_hardware
+                    .store(false, Ordering::Relaxed);
                 output_gate.clear();
                 color_pipeline.reset();
                 for (device, _, _) in &mut wled_outputs {
@@ -2174,7 +2190,9 @@ async fn run_test_blended(acknowledge_clear_capture: bool, width: u32, height: u
     }
     for _ in 0..3 {
         if capture::media::query().await != PlaybackClass::Clear {
-            return Err(anyhow!("source not independently classified Clear; no screenshot requested"));
+            return Err(anyhow!(
+                "source not independently classified Clear; no screenshot requested"
+            ));
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
