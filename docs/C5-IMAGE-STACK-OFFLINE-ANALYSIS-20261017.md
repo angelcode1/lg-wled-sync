@@ -41,7 +41,16 @@ On a Mac (replace the host):
 ```sh
 TV_HOST=192.168.8.X
 ssh "root@$TV_HOST" 'luna-send -n 1 -f luna://com.webos.service.capture/getCapability "{}" 2>&1'
-ssh "root@$TV_HOST" 'for p in /proc/[0-9]*/maps; do grep -q -E "/usr/lib/libvtcapture|/usr/lib/libhalgal|/usr/sbin/captureservice" "$p" 2>/dev/null || continue; pid=${p#/proc/}; pid=${pid%/maps}; printf "PID=%s COMM=" "$pid"; cat "/proc/$pid/comm" 2>/dev/null; grep -E "/usr/lib/libvtcapture|/usr/lib/libhalgal|/usr/sbin/captureservice" "$p" 2>/dev/null | awk "{print \\$6}" | sort -u; done'
+ssh "root@$TV_HOST" 'sh -s' <<'SH'
+for p in /proc/[0-9]*/maps; do
+  grep -q -E '/usr/lib/libvtcapture|/usr/lib/libhalgal|/usr/sbin/captureservice' "$p" 2>/dev/null || continue
+  pid=${p#/proc/}
+  pid=${pid%/maps}
+  printf 'PID=%s COMM=' "$pid"
+  cat "/proc/$pid/comm" 2>/dev/null
+  grep -E '/usr/lib/libvtcapture|/usr/lib/libhalgal|/usr/sbin/captureservice' "$p" 2>/dev/null | awk '{print $NF}' | sort -u
+done
+SH
 ```
 
 A capture service permission rejection is a valid result and must not be worked around by widening roles. The archive does not contain the LS2 service manifests and roles needed to assert entitlement. Record the denied response without mutation.
