@@ -76,6 +76,16 @@ enum Commands {
         #[arg(long)]
         raw_nv12_stats: bool,
     },
+    /// Test one LG-managed BLENDED PNG screenshot; no lighting output.
+    TestBlended {
+        /// Confirm the displayed source is an authorized, unprotected local video.
+        #[arg(long)]
+        acknowledge_clear_capture: bool,
+        #[arg(long, default_value_t = 320)]
+        width: u32,
+        #[arg(long, default_value_t = 180)]
+        height: u32,
+    },
     /// Explicit, bounded native LG histogram probe; no config or light output
     TestHistogram {
         /// Confirm that this test temporarily initializes the LG VT histogram device
@@ -197,6 +207,11 @@ async fn main() -> Result<()> {
             config,
             raw_nv12_stats,
         } => run_test_capture(config, raw_nv12_stats).await,
+        Commands::TestBlended {
+            acknowledge_clear_capture,
+            width,
+            height,
+        } => run_test_blended(acknowledge_clear_capture, width, height).await,
         Commands::TestHistogram {
             acknowledge_native_capture,
             samples,
@@ -836,6 +851,11 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     // Long-lived Luna requests must not stall 30–60 FPS LED output. Poll
     // results in background tasks, without detaching uncontrolled processes.
     let mut media_query: Option<tokio::task::JoinHandle<PlaybackClass>> = None;
+    // One in-flight screenshot maximum. No captures while source class is
+    // Unknown/Protected or sync is paused, stopped, or being reconfigured.
+    let mut blended_request: Option<tokio::task::JoinHandle<Result<capture::blended::BlendedFrame>>> = None;
+    let mut last_blended_valid: Option<std::time::Instant> = None;
+    let mut blended_black_sent = false;
     let mut model_query: Option<tokio::task::JoinHandle<Option<String>>> = None;
     let mut tv_model: Option<String> = None;
     let mut last_model_check = tokio::time::Instant::now() - Duration::from_secs(31);
@@ -1062,6 +1082,11 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             // paused-management loop; never leave VT resources pinned.
             histogram_capture = None;
             using_histogram = false;
+            if let Some(request) = blended_request.take() {
+                request.abort();
+            }
+            last_blended_valid = None;
+            blended_black_sent = false;
             capture = Box::new(MockCapture::new(
                 config.capture_width,
                 config.capture_height,
@@ -1538,6 +1563,11 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 continue 'sync_loop;
             }
             capture_faulted = false;
+            if let Some(request) = blended_request.take() {
+                request.abort();
+            }
+            last_blended_valid = None;
+            blended_black_sent = false;
             histogram_capture = None;
             using_histogram = false;
             color_pipeline.reset();
@@ -1666,6 +1696,13 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             std::time::Instant::now(),
         );
         let needs_histogram = route.source != Source::Frame;
+        if needs_histogram {
+            if let Some(request) = blended_request.take() {
+                request.abort();
+            }
+            last_blended_valid = None;
+            blended_black_sent = false;
+        }
         // Release VT frame ownership as soon as clear classification is lost.
         if needs_histogram && capture.is_real_hardware() {
             capture = Box::new(MockCapture::new(
@@ -1836,7 +1873,11 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             output_gate.clear();
             histogram_black_sent = false;
             last_histogram_valid = None;
-            capture = create_capture(config.capture_width, config.capture_height);
+            capture = if config.blended_capture_enabled {
+                Box::new(MockCapture::new(config.capture_width, config.capture_height))
+            } else {
+                create_capture(config.capture_width, config.capture_height)
+            };
             shared_state
                 .capture_hardware
                 .store(capture.is_real_hardware(), Ordering::Relaxed);
@@ -1845,6 +1886,115 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             info!("Unprotected media stable; returned to normal frame capture");
         }
         shared_state.capture_source.store(0, Ordering::Relaxed);
+
+
+        // The C5 BLENDED path is an opt-in, LG-managed screenshot producer.
+        // It never opens /dev/video60, and does not share the unsafe VT buffer
+        // pointers. An active, freshly classified Clear route is mandatory.
+        if config.blended_capture_enabled {
+            if capture.is_real_hardware() {
+                capture = Box::new(MockCapture::new(
+                    config.capture_width,
+                    config.capture_height,
+                ));
+            }
+            if blended_request.as_ref().is_some_and(|task| task.is_finished()) {
+                let completed = blended_request.take().expect("checked above");
+                match completed.await {
+                    Ok(Ok(frame)) if frame.finished.elapsed() <= Duration::from_millis(500) => {
+                        match color_pipeline.frame(&frame.pixels, frame.width, frame.height, false) {
+                            Ok(field) => {
+                                last_blended_valid = Some(frame.finished);
+                                blended_black_sent = false;
+                                shared_state.capture_hardware.store(true, Ordering::Relaxed);
+                                let settings = shared_state.current_settings.read().unwrap().clone();
+                                let mut fanout = OutputFanout {
+                                    field: &field,
+                                    config: &config,
+                                    settings: &settings,
+                                    shared: &shared_state,
+                                    wled: &mut wled_outputs,
+                                    hue_transport: &mut hue_dtls,
+                                    hue_packets: &mut hue_packet_builder,
+                                    nanoleaf_transport: &mut nanoleaf_streamer,
+                                    nanoleaf_layout: &nanoleaf_sampler,
+                                    hue_enabled: hue_active && hue_sync_enabled,
+                                    nanoleaf_enabled: nanoleaf_active && nanoleaf_sync_enabled,
+                                    hue_retry: &mut hue_retry,
+                                    nanoleaf_retry: &mut nanoleaf_retry,
+                                    gate: &mut output_gate,
+                                };
+                                emitted_light_update = fanout.publish();
+                            }
+                            Err(error) => warn!("Rejected BLENDED image: {error:#}"),
+                        }
+                    }
+                    Ok(Ok(_)) => warn!("Discarded stale BLENDED frame"),
+                    Ok(Err(error)) => warn!("BLENDED capture unavailable: {error:#}"),
+                    Err(error) => warn!("BLENDED task failed: {error}"),
+                }
+            }
+            if blended_request.is_none() {
+                let width = config.capture_width;
+                let height = config.capture_height;
+                blended_request = Some(tokio::spawn(capture::blended::capture_once(width, height)));
+            }
+            // Treat an unavailable or stale screenshot just like an absent
+            // native sample: black every vendor after at most 500ms.
+            if last_blended_valid
+                .is_none_or(|t| t.elapsed() > Duration::from_millis(500))
+                && !blended_black_sent
+            {
+                blended_black_sent = true;
+                shared_state.capture_hardware.store(false, Ordering::Relaxed);
+                output_gate.clear();
+                color_pipeline.reset();
+                for (device, _, _) in &mut wled_outputs {
+                    let black = vec![RgbColor::new(0, 0, 0); device.led_count()];
+                    let _ = device.send(&LightFrame {
+                        colors: &black,
+                        source: ColorSource::Frame,
+                    });
+                }
+                if let Some(ref mut nl) = nanoleaf_streamer {
+                    let black = vec![RgbColor::new(0, 0, 0); nl.panel_count()];
+                    let _ = nl.send(&LightFrame {
+                        colors: &black,
+                        source: ColorSource::Frame,
+                    });
+                }
+                if let (Some(ref mut dtls), Some(ref mut packets)) =
+                    (&mut hue_dtls, &mut hue_packet_builder)
+                {
+                    let ids: Vec<u8> = config.zones.iter().map(|z| z.channel_id).collect();
+                    let black = vec![RgbColor::new(0, 0, 0); ids.len()];
+                    let mut output = HueOutput {
+                        transport: dtls,
+                        packets,
+                        channel_ids: &ids,
+                        use_xy: false,
+                    };
+                    let _ = output.send(&LightFrame {
+                        colors: &black,
+                        source: ColorSource::Frame,
+                    });
+                }
+            }
+            if emitted_light_update {
+                light_update_count = light_update_count.saturating_add(1);
+            }
+            if light_update_window.elapsed() >= Duration::from_secs(1) {
+                let elapsed = light_update_window.elapsed().as_secs_f32();
+                shared_state.set_light_update_fps(light_update_count as f32 / elapsed);
+                light_update_count = 0;
+                light_update_window = tokio::time::Instant::now();
+            }
+            let elapsed = loop_start.elapsed();
+            if elapsed < frame_interval {
+                tokio::time::sleep(frame_interval - elapsed).await;
+            }
+            continue 'sync_loop;
+        }
 
         // If currently on fallback MockCapture, rapidly probe if hardware VtCapture has become available
         // (e.g. if the TV was on the home screen at boot or during input/format switch)
@@ -1993,6 +2143,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
     }
 
+    // Cancel the screenshot client and remove its private temporary image.
+    if let Some(request) = blended_request.take() {
+        request.abort();
+    }
     // Cleanup: deactivate Hue stream
     if hue_active {
         info!("Deactivating entertainment area stream on Hue Bridge...");
@@ -2009,6 +2163,30 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     }
 
     info!("lg-hue-sync terminated cleanly.");
+    Ok(())
+}
+
+/// One opt-in screenshot validation under this binary's own process identity.
+/// Never persist the image or output colours; require stable clear source.
+async fn run_test_blended(acknowledge_clear_capture: bool, width: u32, height: u32) -> Result<()> {
+    if !acknowledge_clear_capture {
+        return Err(anyhow!("BLENDED test requires --acknowledge-clear-capture"));
+    }
+    for _ in 0..3 {
+        if capture::media::query().await != PlaybackClass::Clear {
+            return Err(anyhow!("source not independently classified Clear; no screenshot requested"));
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let start = std::time::Instant::now();
+    let frame = capture::blended::capture_once(width, height).await?;
+    info!(
+        "BLENDED_TEST_PASS width={} height={} rgba_bytes={} elapsed_ms={} (no image retained)",
+        frame.width,
+        frame.height,
+        frame.pixels.len(),
+        start.elapsed().as_millis()
+    );
     Ok(())
 }
 
