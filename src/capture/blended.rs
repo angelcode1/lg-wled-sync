@@ -132,7 +132,7 @@ fn decode_png_rgb_or_rgba(png: &[u8], width: u32, height: u32) -> Result<Vec<u8>
         if end > png.len() {
             bail!("truncated PNG chunk");
         }
-        let kind = &png[offset + 4..offset + 8];
+        let kind: &[u8; 4] = png[offset + 4..offset + 8].try_into()?;
         let chunk = &png[offset + 8..offset + 8 + size];
         let expected_crc = u32::from_be_bytes(png[end - 4..end].try_into()?);
         let mut crc = crc32fast::Hasher::new();
@@ -271,9 +271,6 @@ mod tests {
         } else {
             &[50, 100, 150, 255][..]
         });
-        if filter == 1 {
-            // First pixel has no left neighbour.
-        }
         let mut deflater = ZlibEncoder::new(Vec::new(), Compression::default());
         deflater.write_all(&raw).unwrap();
         let idat = deflater.finish().unwrap();
