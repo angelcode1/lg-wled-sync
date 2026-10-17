@@ -56,3 +56,11 @@ SH
 A capture service permission rejection is a valid result and must not be worked around by widening roles. The archive does not contain the LS2 service manifests and roles needed to assert entitlement. Record the denied response without mutation.
 
 **No existing binary, service, permissions, capture session, or TV preferences were modified by this offline review.**
+
+## Runtime `getCapability` reply and binary verification
+
+TV response from `luna://com.webos.service.capture/getCapability` with `{}`: `{"returnValue":true}`, with no capability fields. This confirms an accepted response, **not** a successful screenshot, authorized video pixel access, a valid capture path, or a supported real-time mode.
+
+The shipped `/usr/sbin/captureservice` ELF has dynamic symbol `CaptureProperties::processGetCapability(LSHandle*, LSMessage*, void*)` at Thumb address `0x1d65d`, size **4 bytes**. Offline Thumb disassembly of the same user-provided ELF shows a branch at `0x1d65c` directly to `CaptureProperties::processGetClipRegions` at `0x1d530`. The `processGetProperties`, `processGetOptions`, and several related read-only handlers also branch into this same implementation. Therefore an empty success response is not surprising, and repeatedly calling `getCapability` cannot establish what images are actually available.
+
+The ELF contains explicit `permissionClient` and `forceCaptureClient` parsers and references `/etc/palm/whitelist-conf.json` and `/home/root/whitelist-conf.json`. Inspect the existing files **read-only**; do not add clients or override roles. Avoid sharing unrelated configuration or device identifiers from these files.
