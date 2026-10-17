@@ -27,6 +27,8 @@ openssl = { version = "0.10", features = ["vendored"] }
 libloading = "0.9"
 sd-notify = "0.5"
 libc = "0.2"
+flate2 = "1.1"
+crc32fast = "1.5"
 palette = { version = "0.7.7", default-features = false, features = ["std"] }
 yuv = { version = "0.8.19", default-features = false, features = ["professional_mode"] }
 
