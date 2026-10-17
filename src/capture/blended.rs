@@ -73,14 +73,9 @@ pub async fn capture_once(width: u32, height: u32) -> Result<BlendedFrame> {
         "height": height,
         "format": "png"
     });
-    let reply = luna_client::request(
-        URI,
-        &request.to_string(),
-        Duration::from_millis(1300),
-        8192,
-    )
-    .await
-    .ok_or_else(|| anyhow!("BLENDED Luna request failed or timed out"))?;
+    let reply = luna_client::request(URI, &request.to_string(), Duration::from_millis(1300), 8192)
+        .await
+        .ok_or_else(|| anyhow!("BLENDED Luna request failed or timed out"))?;
     if reply["returnValue"].as_bool() != Some(true) {
         bail!("LG capture service rejected BLENDED request");
     }
@@ -145,9 +140,12 @@ fn decode_png_rgb_or_rgba(png: &[u8], width: u32, height: u32) -> Result<Vec<u8>
             b"IHDR" if !saw_ihdr && size == 13 && offset == PNG_MAGIC.len() => {
                 let png_width = u32::from_be_bytes(chunk[0..4].try_into()?);
                 let png_height = u32::from_be_bytes(chunk[4..8].try_into()?);
-                if png_width != width || png_height != height
-                    || chunk[8] != 8 || chunk[10] != 0
-                    || chunk[11] != 0 || chunk[12] != 0
+                if png_width != width
+                    || png_height != height
+                    || chunk[8] != 8
+                    || chunk[10] != 0
+                    || chunk[11] != 0
+                    || chunk[12] != 0
                 {
                     bail!("unsupported PNG geometry, bit depth, or interlace");
                 }
@@ -275,7 +273,11 @@ mod tests {
         deflater.write_all(&raw).unwrap();
         let idat = deflater.finish().unwrap();
         let mut png = PNG_MAGIC.to_vec();
-        chunk(&mut png, b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, mode, 0, 0, 0]);
+        chunk(
+            &mut png,
+            b"IHDR",
+            &[0, 0, 0, 1, 0, 0, 0, 1, 8, mode, 0, 0, 0],
+        );
         chunk(&mut png, b"IDAT", &idat);
         chunk(&mut png, b"IEND", &[]);
         png
