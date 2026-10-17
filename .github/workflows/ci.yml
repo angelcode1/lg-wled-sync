@@ -130,11 +130,11 @@ jobs:
               raise SystemExit('FAIL: requires GLIBC newer than 2.28: ' + str(too_new))
           print('PASS: ARMv7 ELF and GLIBC <= 2.28')
           PY
-      - name: Upload short-lived C5 ARMv7 histogram test binary
-        if: github.ref == 'refs/heads/feature/vendor-neutral-wled-drm-first'
+      - name: Upload experimental C5 BLENDED ARMv7 binary
+        if: github.ref == 'refs/heads/feature/wled-protocols-c5-readonly-20261017'
         uses: actions/upload-artifact@v4
         with:
-          name: c5-histogram-probe-armv7
+          name: c5-blended-armv7
           path: target/armv7-unknown-linux-gnueabi/release/lg-hue-sync
           retention-days: 7
           if-no-files-found: error
