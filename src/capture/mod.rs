@@ -1,3 +1,4 @@
+pub mod blended;
 pub mod dile_vt;
 pub mod drm_routing;
 pub mod histogram;
