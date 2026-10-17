@@ -162,6 +162,12 @@ pub struct WledConfig {
     pub ip: String,
     #[serde(default = "default_wled_port")]
     pub udp_port: u16,
+    #[serde(default)]
+    pub protocol: crate::output::wled::WledProtocol,
+    #[serde(default)]
+    pub color_mode: crate::output::wled::WledColorMode,
+    #[serde(default = "default_output_trim")]
+    pub white_mix: f32,
     pub led_count: usize,
     #[serde(default)]
     pub start_corner: crate::output::perimeter::StartCorner,
@@ -388,7 +394,8 @@ impl Config {
         for device in &self.wled_devices {
             if device.enabled
                 && (device.ip.trim().is_empty()
-                    || device.udp_port == 0
+                    || !device.white_mix.is_finite()
+                    || !(0.0..=1.0).contains(&device.white_mix)
                     || device.led_count == 0
                     || device.led_count > 65536
                     || !device.brightness_trim.is_finite()
