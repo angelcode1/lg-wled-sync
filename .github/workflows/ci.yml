@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, feature/vendor-neutral-wled-drm-first]
+    branches: [main, 'feature/**']
     tags: ["v*"]
   pull_request:
     branches: [main, feature/vendor-neutral-wled-drm-first]
