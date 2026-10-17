@@ -161,3 +161,38 @@ echo "$OUT.zip"
 ```
 
 The command reads files only, never invokes either binary, and does not start capture or alter LS2 policy. A role permitting outbound access is not necessarily proof that capture frames can be retrieved from a daemon running under our own identity.
+
+## Second offline image-stack archive: direct LG lighting algorithm (2026-10-17)
+
+Evidence: `c5-capture-deep-20261017-230452.zip` (valid 2.8 MB archive; previous `230354.zip` was only 246 bytes). No shipped binaries, network addresses or sensitive device records are committed.
+
+**New important observation:** `/usr/sbin/lightingcontroller` is a genuine video-responsive LED colour-processing implementation. Unlike `livepick` it **links to `libvtcapture.so.1` directly** and imports:
+
+`vtCapture_create`, `vtCapture_initEx`, `vtCapture_preprocess`, `vtCapture_planeInfo`, `vtCapture_process`, `vtCapture_currentCaptureBuffInfo`, `vtCapture_stop`, `vtCapture_postprocess`, `vtCapture_finalize` and `vtCapture_release`.
+
+It includes exported functions `_vtCaptureCreateHandleEx`, `_vtCaptureCreateHandle`, `_vtCaptureInitialize`, `_vtCapturePreprocess`, `_vtCaptureProcess`, `_vtCaptureCurrentCaptureBuffInfo`, `csc_YUV420toRGB`, `kMeansClustering` and `ledController::sendLedArrayData`.
+
+A **static Thumb instruction-level review** of `_vtCaptureCurrentCaptureBuffInfo(unsigned char*)` (`0x15e44`, 304 bytes) shows:
+
+- It checks that the returned first two YUV plane pointers are non-null.
+- It requires first plane size `0xc00` (3072 bytes) and second `0x600` (1536 bytes). These match **64×48 planar YUV420** (not a full-size frame).
+- It calls `csc_YUV420toRGB` with dimensions **64 × 48** and then `kMeansClustering` with first argument **13**.
+- This proves an explicit **low-resolution capture → YUV/RGB conversion → clustered colour calculation** path in LG's code. The first argument `13` denotes a parameter of the clustering routine; it is **not proof of 13 external LEDs or display zones**.
+- The low-level routine still consumes `vtCapture_currentCaptureBuffInfo` pointers. It **does not establish a stable buffer lease, DMA cache-coherency guarantee, or LS2 entitlement** for our Rust process. Never remove the exact-C5 buffer guard just because vendor code references these pointers.
+
+`_vtCapturePreprocess` sets a dump value of **2**, requests a **3-buffer** setup and **30 fps**. The native dimensions and YUV payload must be interpreted in light of the API's packed struct and returned plane metadata, not guessed from a lone constant. The binary uses `vtCapture_initEx` rather than the Rust adapter's original `vtCapture_init` — a useful ABI difference for offline comparison **only**; calling it under the existing unresolved C5 capture ownership/policy problems is not authorized.
+
+`lightingcontroller` also includes `lightingSyncMode`, `virtualMicom::setRGB`, I²C/GPIO/PWM and LED microcontroller firmware logic. This LED control is a distinct LG hardware path; **do not redirect or modify it to drive WLED**. A safe Rust enhancement is to independently benchmark low-resolution RGB clustering against existing colour-field perimeter sampling on synthetic/known-clear input, without copying vendor code or touching native capture.
+
+**Live process evidence:** only `surface-manager` (PID 2259 at the moment of capture) and `captureservice` (PID 4729) matched the collector. Neither `lightingcontroller` nor `livepick` was running. The capture service had `libvtcapture.so.1.0.0` and `libhalgal.so.2.0.1` mapped and `/dev/fb0`, `/dev/fb1`, `/dev/fb3` open, but **no `/dev/video60` file handle was reported** in that snapshot. The surface-manager used `/dev/dri/card0`, with compositor/Qt code mapped. Absence of a V4L2 file handle in a single snapshot is not proof that the service cannot open VT when an authorized image-capture request occurs.
+
+**LivePick:** binary `/usr/sbin/livepick` imports Luna clients but does **not** link `libvtcapture`/HAL_GAL directly. Static strings/symbols show `LsRequester::executeOneShot`, `getLastCapturedImage` and temporary JPEG/YUV paths. Its outbound LS2 role lists `com.webos.service.capture`. This corroborates **LG-managed one-shot screenshot use** through Luna, not continuous low-latency WLED frames.
+
+**LS2 distinction:** `lightingcontroller` has regular role `/usr/sbin/lightingcontroller`, allowed name `com.webos.service.capture.client*`, and wildcard outbound access for that own name. Its `client-permissions.d` includes `all/public/private` under `com.webos.service.lightingcontroller`. These exact privileges cannot be assumed for our Rust daemon, and the service may only run on hardware variants supporting LG external lighting.
+
+### Rust implementation recommendations grounded in this binary
+
+1. Add **offline benchmark fixtures** at 64×48 YUV420 and compare a vendor-inspired independently developed dominant-colour clustering heuristic to our current spatial perimeter field, particularly uniform darks, desaturated highlights and moving edges. Clustering should be an opt-in colour-processing mode, not a capture bypass.
+2. Keep **geometry/path separation**: LG's clustered colour for device-level lighting is not a substitute for spatially separated per-edge WLED colours. Preserve native multi-device mapping.
+3. Capture diagnostics can record requested preprocess profile and returned frame sizes *only after* owner/LS2 authorization and an explicitly approved known-clear device test. No new native capture or producer-buffer interference is justified by this static evidence.
+4. Retain blacklist of exact `libvtcapture` hash `6483fc0b82a9da6f65e11e85f9dc43bb163de80fe2c3c84b84afa251b0f6892c` for histograms and unsafe raw-buffer CPU access. Maintain unknown/protected blackout and never infer DRM classification from capture availability.
