@@ -56,7 +56,7 @@ help:
 	@printf "  $(GREEN)make deploy$(RESET)        Full deployment: build, upload binary & config, configure systemd/init.d, start\n"
 	@printf "  $(GREEN)make deploy-bin$(RESET)    Quick deploy: scp binary only to TV and restart daemon\n"
 	@printf "  $(GREEN)make deploy-config$(RESET) Quick deploy: scp config.json only to TV and restart daemon\n"
-	@printf "  $(GREEN)make provision-luna$(RESET) Provision Luna manifests and permissions for vtcapture on TV\n\n"
+	@printf "  $(GREEN)make provision-luna$(RESET) Disabled unsafe wildcard Luna provisioning; no changes to TV\n\n"
 	@printf "$(CYAN)Service Management & Remote Shell:$(RESET)\n"
 	@printf "  $(GREEN)make status$(RESET)        Check daemon systemd status on TV\n"
 	@printf "  $(GREEN)make logs$(RESET)          Follow daemon logs on TV (journalctl -f)\n"
@@ -138,8 +138,8 @@ deploy: require-tv
 	fi
 	@./scripts/deploy.sh $(TV_IP) $(SSH_PORT)
 
-## quick deploy: upload binary only to TV, provision Luna, and restart daemon
-deploy-bin: require-tv provision-luna
+## quick deploy: upload binary only; preserve existing Luna permissions and restart daemon
+deploy-bin: require-tv
 	@if [ ! -f "$(BINARY)" ]; then \
 	  printf "$(RED)[-] Binary $(BINARY) not found. Run 'make build' first.$(RESET)\n"; \
 	  exit 1; \
@@ -153,7 +153,7 @@ deploy-bin: require-tv provision-luna
 	ssh $(SSH_OPTS) root@$(TV_IP) "systemctl stop lg-hue-sync 2>/dev/null || true; if [ -x $(REMOTE_DIR)/lg-hue-sync ]; then cp -f $(REMOTE_DIR)/lg-hue-sync $(REMOTE_DIR)/lg-hue-sync.previous; fi; mv -f $(REMOTE_DIR)/lg-hue-sync.new $(REMOTE_DIR)/lg-hue-sync; chmod +x $(REMOTE_DIR)/lg-hue-sync; systemctl start lg-hue-sync"
 	@printf "$(GREEN)[+] Binary deployed and service started.$(RESET)\n"
 
-## provision Luna Service 2 manifests and permissions on TV
+## obsolete legacy permission provisioning; deliberately disabled (no TV mutation)
 provision-luna: require-tv
 	@./scripts/provision_luna.sh $(TV_IP) $(SSH_PORT)
 
