@@ -35,6 +35,7 @@ pub enum WledColorMode {
     Rgbw,
 }
 
+#[allow(dead_code)] // Public legacy helper retained for downstream consumers.
 pub fn default_port(protocol: WledProtocol) -> u16 {
     match protocol {
         WledProtocol::Realtime => DEFAULT_PORT,
@@ -153,6 +154,7 @@ pub fn encode_packets_configured(
 }
 
 /// Preserve the exact legacy RGB/DRGB/DNRGB API for existing clients.
+#[allow(dead_code)] // Byte-compatible legacy encoder retained for downstream consumers.
 pub fn encode_packets(colors: &[RgbColor]) -> io::Result<Vec<Vec<u8>>> {
     encode_packets_configured(colors, WledProtocol::Realtime, WledColorMode::Rgb, 1.0, 1)
 }
@@ -168,6 +170,7 @@ pub struct WledUdpStreamer {
 }
 
 impl WledUdpStreamer {
+    #[allow(dead_code)] // Legacy constructor: explicit protocol config uses new_configured.
     pub fn new(host: &str, port: u16, count: usize) -> io::Result<Self> {
         Self::new_configured(
             host,
@@ -238,6 +241,7 @@ impl WledUdpStreamer {
     pub fn target(&self) -> SocketAddr {
         self.target
     }
+    #[allow(dead_code)] // Useful for independent integration consumers.
     pub fn protocol(&self) -> WledProtocol {
         self.protocol
     }
