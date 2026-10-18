@@ -189,28 +189,40 @@ benchmark. Histogram functionality was not tested in this experiment.
 
 ### Trailing Mac shell-script error and safe next actions
 
-The error `SSH_PID: unbound variable` is consistent with a shell
-executing with `set -u` and expanding an unset process variable
-in post-stream cleanup. The installer script was distributed in the
-separate Mac kit; it is **not tracked in this repository**, so the
-precise faulty line and the intended process lifecycle have not
-been independently inspected. Do not claim that the bundled installer
-has been fixed.
+The operator's follow-up inspection confirmed the exact cause.
+The Mac wrapper launches a background SSH process on line 200 using
+`<<'REMOTE_INSTALL' &`, but line 201 assigns `SSH_PID=$!` **inside the
+heredoc body**. This assignment is sent to the TV's remote shell, not
+executed by the Mac shell. The `REMOTE_INSTALL` delimiter closes on
+line 349. Therefore the Mac process reaches `wait "$SSH_PID"` on
+line 356 with `SSH_PID` unset, causing the observed error under
+`set -u`. This is a deterministic host script-scope defect, not a
+failure of either JPEG capture or the verified Stage 1 restore.
+
+**Exact fix for the separate Mac kit (not yet applied to or rebuilt
+in the distributed ZIP):** remove `SSH_PID=$!` from line 201,
+inside the heredoc, and insert it directly **after** the standalone
+`REMOTE_INSTALL` closing delimiter and before the analyser.
+This saves the PID of the just-started background SSH job in the
+parent Mac shell and enables meaningful SSH exit-status checking
+with the existing `wait "$SSH_PID"`. Do **not** merely substitute
+`wait "${SSH_PID:-}"`, which would mask the real lifecycle bug.
 
 Before any future on-device test:
 
-1. On the Mac, inspect the existing kit script around line 356:
-   `nl -ba c5-ls2-stage7-mac.sh | sed -n '330,370p'`.
-   Initialize optional subprocess PIDs before their first use and
-   guard each reference with `${SSH_PID:-}` where appropriate.
-   Do not kill a guessed PID or automatically rerun the capture.
-2. Read-only inspect the TV scratch namespace; independently check
-   for leftover `/tmp/c5-ls2-stage7-*` paths. Do not infer complete
-   scratch cleanup merely from a passing Stage 1 receipt.
-3. A cleanup-only change should be shipped as a **new checksum-pinned
-   Mac kit**, with shell syntax/lifecycle tests for cleanup before any
-   repeat experiment. Existing Stage 1, permissions, and production
-   behaviour should remain unchanged.
+1. Fix the local Mac script with an exact-match, backed-up edit.
+   Verify that there is exactly one `SSH_PID=$!`, between the
+   closing heredoc delimiter and the `wait` statement. Run
+   `sh -n c5-ls2-stage7-mac.sh` and an offline regression test that
+   exercises the heredoc PID scope.
+2. Read-only inspect the TV scratch namespace for leftover
+   `/tmp/c5-ls2-stage7-*` paths. Passing Stage 1 receipts alone
+   do not establish successful scratch cleanup.
+3. Before repeat device use, produce a **new checksum-pinned Mac
+   kit** with this one-line relocation and verified shell lifecycle
+   behavior. Preserve the TV's original Stage 1 baseline and
+   production capture/permission policy; do not automatically retry
+   captures.
 
 All Stage 7 metrics quoted above derive from operator-provided terminal
 output, not from image files. No image was supplied to the repository.
