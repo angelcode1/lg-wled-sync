@@ -154,6 +154,11 @@ pub fn run(acknowledge: bool) -> Result<()> {
         let mut main_context: *mut libc::c_void = ptr::null_mut();
         let mut token: u32 = 0;
         let mut completed = false;
+        // Keep the callback state alive until cancellation and LSUnregister.
+        let mut reply = ReplyState {
+            payload_fn: *get_payload,
+            received: None,
+        };
         let test_result = (|| -> Result<()> {
             main_context = context_new();
             if main_context.is_null() {
@@ -162,10 +167,6 @@ pub fn run(acknowledge: bool) -> Result<()> {
             checked(*init, *free, "LS2_ATTACH", |error| {
                 attach(handle, main_context, error)
             })?;
-            let mut reply = ReplyState {
-                payload_fn: *get_payload,
-                received: None,
-            };
             checked(*init, *free, "LS2_CALL_DENIED_OR_FAILED", |error| {
                 call(
                     handle,
@@ -185,7 +186,7 @@ pub fn run(acknowledge: bool) -> Result<()> {
                     std::thread::sleep(Duration::from_millis(10));
                 }
             }
-            if let Some(payload) = reply.received {
+            if let Some(payload) = reply.received.as_deref() {
                 completed = true;
                 println!("LS2_GETCAPABILITY_REPLY {payload}");
                 Ok(())
