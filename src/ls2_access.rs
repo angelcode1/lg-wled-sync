@@ -237,8 +237,7 @@ pub async fn run_one_clear_execute(acknowledge: bool) -> Result<()> {
         bail!("pass --acknowledge-single-clear-execute for one native LG screenshot");
     }
     for _ in 0..3 {
-        if crate::capture::media::query().await
-            != crate::capture::drm_routing::PlaybackClass::Clear
+        if crate::capture::media::query().await != crate::capture::drm_routing::PlaybackClass::Clear
         {
             bail!("C5_EXECUTE_REFUSE_MEDIA_NOT_CLEAR: no capture requested");
         }
@@ -479,7 +478,9 @@ fn run_handle_session(
         cleanup_result.context("native Luna test must unregister cleanly")?;
         test_result?;
         if execute_runtime.is_some() {
-            println!("C5_SINGLE_EXECUTE_PASS created=1 executed=1 destroyed=1 frame_retained=false");
+            println!(
+                "C5_SINGLE_EXECUTE_PASS created=1 executed=1 destroyed=1 frame_retained=false"
+            );
         } else if configure {
             println!(
                 "C5_HANDLE_CONFIGURATION_PASS created=1 configured=true destroyed=1 no_pixels=true"
@@ -510,10 +511,7 @@ fn verify_private_jpeg(path: &std::path::Path) -> Result<usize> {
 }
 
 fn verify_jpeg_dimensions(jpeg: &[u8], expected_width: u16, expected_height: u16) -> Result<()> {
-    if !jpeg.starts_with(&[0xff, 0xd8])
-        || !jpeg.ends_with(&[0xff, 0xd9])
-        || jpeg.len() < 16
-    {
+    if !jpeg.starts_with(&[0xff, 0xd8]) || !jpeg.ends_with(&[0xff, 0xd9]) || jpeg.len() < 16 {
         bail!("C5_EXECUTE_JPEG_INVALID_MARKERS");
     }
     let mut cursor = 2usize;
@@ -539,7 +537,11 @@ fn verify_jpeg_dimensions(jpeg: &[u8], expected_width: u16, expected_height: u16
             break;
         }
         let length = usize::from(u16::from_be_bytes([jpeg[cursor], jpeg[cursor + 1]]));
-        if length < 2 || cursor.checked_add(length).is_none_or(|end| end > jpeg.len()) {
+        if length < 2
+            || cursor
+                .checked_add(length)
+                .is_none_or(|end| end > jpeg.len())
+        {
             bail!("C5_EXECUTE_JPEG_BAD_SEGMENT_LENGTH");
         }
         // Baseline/progressive/lossless SOF, excluding Huffman/DAC markers.
@@ -578,8 +580,8 @@ mod tests {
         let fake = [
             0xff, 0xd8, // SOI
             0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, // APP0
-            0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0xb4, 0x01, 0x40,
-            0x01, 0x01, 0x11, 0x00, // SOF0 width 320 height 180
+            0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0xb4, 0x01, 0x40, 0x01, 0x01, 0x11,
+            0x00, // SOF0 width 320 height 180
             0xff, 0xd9, // EOI
         ];
         assert!(verify_jpeg_dimensions(&fake, 320, 180).is_ok());
