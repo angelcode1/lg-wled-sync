@@ -11,6 +11,64 @@ Status: **protocol pattern discovered from another webOS client; NOT YET VERIFIE
 - `getCapability {}` yielded only `{"returnValue":true}`, with no capability data. The installed binary routes its capability handler into a short generic handler; that ACK does not verify formats, rates, or authorized handles.
 - No persistent `/dev/video60` owner was seen during monitored BLENDED screenshots; brief opens and other execution modes are not ruled out.
 
+## 2026-10-18 C5 read-only inventory — completed
+
+The owner ran `scripts/c5-execute-lifecycle-inventory.sh` successfully
+at 16:48:29 AEST on the real TV; no capture or handle was created by this test.
+
+- `captureservice` ELF SHA256:
+  `8af5e7e9971867464ce650239f6176c44437facc5ea03459df9826d7192da684`
+  (size 173784 bytes).
+- `lightingcontroller` ELF SHA256:
+  `34de65f1f49949d9f7b9041b90e4de79539cbd1beedb5272b069ff5153342fd0`
+  (size 227556 bytes).
+- Native LS2 registry lists `createHandle`, `setProperties`,
+  `setOptions`, `setOutput`, `execute`, `destroyHandle`, and
+  `executeOneShot` under non-public `capture.client`.
+  Availability of API methods **does not grant** a client rights to call them.
+- Root service `captureservice` was PID 4795 and held `/dev/fb0`,
+  `/dev/fb1`, `/dev/fb3`. No `/dev/video60` FD was observed at the
+  instant of sampling; transient opens or other clients aren't ruled out.
+- The inventory's role-name/content grep matched
+  `com.webos.lunasend.role.json` and `com.webos.lunasendpub.role.json`,
+  **not** an explicit role for the experimental Rust binary. This is not
+  an exhaustive LS2 permission audit: generic rules may exist.
+- `/usr/bin/node` is available but the default Node module resolver
+  reports `PALMBUS_MODULE=UNAVAILABLE`; the native
+  `/usr/bin/luna-send` binary is available. We must not conflate the
+  native command's privilege identity with the Rust binary.
+- `lightingcontroller` and `captureservice` roles can register LG-owned
+  `com.webos.service.capture.client*` names. Our daemon must **not**
+  register those reserved names or borrow those roles.
+
+### Next non-capture permission probe
+
+The existing `test-ls2-registration` diagnostic previously offered reserved
+Resource Manager and capture client names. This is unnecessary for the
+C5 capture-service investigation and would confuse service-name registration
+with method authorization. It was changed to **anonymous LSRegister(NULL)**
+followed immediately by LSUnregister, in the same process:
+
+```sh
+/tmp/lg-hue-sync-blended-test test-ls2-registration \
+  --acknowledge-luna-registration
+```
+
+Use the **newly rebuilt binary** (not the prior 7.3 MiB binary, which has
+different test semantics). This makes no capture calls and produces no
+persistent service. Failure proves this executable could not complete the
+anonymous registration in its current environment; success proves only
+anonymous LS2 connectivity, **not capture.client access**. It does not
+call `createHandle` or request an image.
+
+After an anonymous registration succeeds, the next source-controlled test
+should use that **same LS2 handle** to call a read-only capture method,
+and report whether LS2 authorizes or denies it. The direct LS2 RPC method,
+callback and GLib loop must be verified against installed webOS 10 ABI before
+adding this test. If a private method is denied, keep the known-working,
+bounded `executeOneShot` subprocess backend rather than editing roles or
+using a privileged LG client name.
+
 ## Evidence from other webOS implementations (not C5 observations)
 
 [webos-iptv-player capture client](https://github.com/lennylxx/webos-iptv-player/blob/7d8fd30e927ee9d09ba7979b053f9a25ac932420/scripts/tv-capt-remote.js) contains a concrete reusable capture-handle lifecycle:
@@ -50,4 +108,4 @@ The script prints only relevant policy excerpts, hashes of existing executables,
 - Keep native `libvtcapture` behind its no-dereference guard on this fingerprint. A source-level `release_frame()` no-op in [webosbrew/hyperion-webos](https://github.com/webosbrew/hyperion-webos/blob/master/unicapture/backends/libvtcapture.cpp) does not establish that the returned V4L2 buffer belongs to our Rust process.
 - Avoid user-managed codec streams, firmware modifications and all broad Luna permission grants.
 
-Next user input: run Phase A on the TV and paste the `C5_EXECUTE_INVENTORY_BEGIN` ... `DONE` report. No WLED configuration is needed.
+Next user input: after a successful build, transfer the new ARMv7 binary to a temporary TV path and run `test-ls2-registration --acknowledge-luna-registration`; no WLED configuration is needed.
