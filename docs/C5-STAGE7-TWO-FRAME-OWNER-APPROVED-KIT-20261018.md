@@ -226,3 +226,49 @@ Before any future on-device test:
 
 All Stage 7 metrics quoted above derive from operator-provided terminal
 output, not from image files. No image was supplied to the repository.
+
+## Second owner-reported TV run (2026-10-19 local time)
+
+A second `install` + independent `status` was performed against the
+same approved clear-only test paths. The capture and decoder passed
+again, and the original Stage 1 baseline was again restored with four
+matching SHA-256 receipts. The shell still exited with the **same
+`SSH_PID: unbound variable` at line 356**, so this was **not a
+fully successful wrapper invocation**, and the SSH child's exit status
+remains unverified. The corrected local script was evidently either not
+applied to this executed copy or not in effect. Do not run `install`
+again just to reproduce this host-only failure.
+
+| Metric | First run | Second run |
+| --- | ---: | ---: |
+| Native JPEG bytes | 7,799 | 5,550 |
+| One-shot JPEG bytes | 14,441 | 9,032 |
+| Native request time | 161 ms | 151 ms |
+| One-shot request time | 160 ms | 161 ms |
+| Decoded RGB mean absolute difference | 10.405 | 2.213 |
+| Decoded-image PSNR | 19.42 dB | 29.04 dB |
+| Largest centre-edge channel difference | 12.27 | 0.36 |
+| Full decode | Both | Both |
+| Stage 1 restoration/hash check | PASS | PASS |
+| Child SSH `wait` completed | No | No |
+
+The second comparison reports native/one-shot luminance standard
+deviations 47.22/47.08 and mean luminance 14.99/14.79, with
+`low_detail_warning=false` on both. Both have 320×180 geometry and
+matching subsampling, but the **quantization fingerprints still
+differ** (`c560863d3b5ee431` vs `df846ace420ab4c2`). One-shot
+quality 75 was only requested, not verified. The second pair's
+centre-edge RGB averages are close to black on almost all edges,
+with only a slight blue signal at the bottom. This near-black
+agreement is **not** a calibrated four-colour edge-fidelity
+validation and does not establish real WLED/Hue usefulness.
+Source identity was not confirmed by code.
+
+**Local-only action required, no further TV capture:** inspect the
+exact executed file's heredoc span, relocate `SSH_PID=$!` from its
+body to the line after the `REMOTE_INSTALL` closing delimiter, then
+require an offline static scope check as well as `sh -n`. A bare
+`sh -n` does not detect assignment inside a heredoc. Verify any
+stale `/tmp/c5-ls2-stage7-*` paths with a separate read-only
+inspection before any device work. Do not change production code,
+privileges, or the Stage 1 baseline based on these samples.
