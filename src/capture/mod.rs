@@ -1,10 +1,10 @@
 pub mod blended;
-pub mod mock;
-pub mod source_fps;
 pub mod drm_routing;
 pub mod histogram;
 pub mod luna_client;
 pub mod media;
+pub mod mock;
+pub mod source_fps;
 pub mod v4l2_metadata;
 pub mod vtcapture;
 
