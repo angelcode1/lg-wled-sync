@@ -69,6 +69,53 @@ adding this test. If a private method is denied, keep the known-working,
 bounded `executeOneShot` subprocess backend rather than editing roles or
 using a privileged LG client name.
 
+## 2026-10-18 native Rust LS2 registration result — denied
+
+Owner ran the new safely scoped anonymous LS2 diagnostic, with the exact
+unprivileged binary executable identity. Actual output:
+
+```text
+LS2_ANONYMOUS_ATTEMPT executable=/tmp/lg-hue-sync-ls2-test private_bus=true capture=false
+Error: LS2_ANONYMOUS_REJECTED code=-1027 message=Invalid permissions for (null)
+```
+
+**Conclusions:** LS2's hub rejected `LSRegister(NULL)` for this specific
+standalone executable path and current runtime security environment. It
+did not reach `LSUnregister` because no handle was granted. No
+`createHandle`, `execute`, screenshot, VT driver or LS2 privilege mutation
+was attempted. Unlike the shell's `luna-send`, the Rust test binary has no
+established executable role; lack of a matching role is a strong explanation,
+**not proven the unique cause**. This failure does *not* tell us whether an
+explicitly installed, correctly permissioned native service could register,
+or whether `capture.client` method access would be granted. It is incorrect
+to repeat the same test with an LG-owned name or altered role.
+
+WebOS's documented LS2 configuration model binds a native `role.json`'s
+`exeName` to an absolute executable path and its `allowedNames` /
+outbound permissions. Its access control groups are separately specified
+through `client-permissions.d`. Root does not automatically grant our Rust
+executable `capture.client` rights. Reference:
+https://www.webosose.org/docs/guides/development/configuration-files/security-guide/
+
+**Decision:** retain the known-working `executeOneShot` subprocess
+fallback, which runs under the existing `luna-send` identity and
+conditionally requires a freshly verified `Clear` media state. The
+persistent `execute` path is **blocked for the standalone Rust client**
+until a legitimate least-privilege application-specific LS2 role is
+designed, reviewed, installed separately with owner approval, and verified
+through a non-capture access check. No system LG role edits, wildcard
+`all` grants, or identity impersonation.
+
+Next safe inspection: read the TV's actual
+`/usr/share/luna-service2/roles.d/com.webos.lunasend.role.json`
+metadata, and check installed third-party LS2 role directories
+`/var/luna-service2` / `/var/luna-service2-dev` by **name/metadata only**
+to map policy lookup (no policy changes). The existing daemon/frontend
+bundling and `webos-app/appinfo.json` currently have a broad legacy
+`requiredPermissions: ["all"]` declaration that must not be treated
+as proof of correct native permissions. Audit and replace it with
+least-privilege frontend permissions before installation.
+
 ## Evidence from other webOS implementations (not C5 observations)
 
 [webos-iptv-player capture client](https://github.com/lennylxx/webos-iptv-player/blob/7d8fd30e927ee9d09ba7979b053f9a25ac932420/scripts/tv-capt-remote.js) contains a concrete reusable capture-handle lifecycle:
@@ -108,4 +155,4 @@ The script prints only relevant policy excerpts, hashes of existing executables,
 - Keep native `libvtcapture` behind its no-dereference guard on this fingerprint. A source-level `release_frame()` no-op in [webosbrew/hyperion-webos](https://github.com/webosbrew/hyperion-webos/blob/master/unicapture/backends/libvtcapture.cpp) does not establish that the returned V4L2 buffer belongs to our Rust process.
 - Avoid user-managed codec streams, firmware modifications and all broad Luna permission grants.
 
-Next user input: after a successful build, transfer the new ARMv7 binary to a temporary TV path and run `test-ls2-registration --acknowledge-luna-registration`; no WLED configuration is needed.
+Next input: review the read-only client-role metadata; anonymous LS2 registration from the temporary Rust executable is already known to be rejected and should not be retried.
