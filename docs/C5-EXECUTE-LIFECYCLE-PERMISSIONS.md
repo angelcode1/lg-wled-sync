@@ -118,6 +118,39 @@ front-end app manifest only; it does **not** grant any Luna permissions
 to our native Rust executable or prove the private capture APIs work.
 The dashboard change needs validation on real webOS after packaging.
 
+## 2026-10-18 direct LS2 privileged-client role verification
+
+The owner's next read-only C5 inspection found:
+
+```text
+/usr/share/luna-service2/roles.d/com.webos.lunasend.role.json
+ exeName=/usr/bin/luna-send; type=privileged; allowedNames=["*"]
+ service="*"; outbound=["*"]
+
+/usr/share/luna-service2/roles.d/com.webos.lunasendpub.role.json
+ exeName=/usr/bin/luna-send-pub; type=devmode; allowedNames=["*"]
+ service="*"; outbound=["*"]
+
+Existing matching custom lg-hue-sync roles: NONE FOUND
+```
+
+This strongly explains why `executeOneShot` works under the existing
+`luna-send` subprocess but native `LSRegister(NULL)` from the
+experimental Rust binary was rejected with `-1027`. The root shell's
+UID is not a substitute for the *executable-specific* LS2 role.
+
+The proof is limited: the matching-role search is not a complete hub
+policy dump, and the actual permitted capture ACG remains untested.
+
+**Stage 1 prepared, not installed:** `security/c5-execute-stage1/`
+contains an own-identity, exact-exeName registration-only role and an
+`--named-probe` Rust diagnostic. It grants **zero outbound calls and
+zero capture groups**. It is intentionally insufficient to invoke
+`execute` or `createHandle`. It is a test of ordinary client
+registration only, requires separate explicit owner approval to install
+TV policy files, and has a documented rollback. Do not use
+`com.webos.service.capture.client*` as the Rust probe identity.
+
 ## Evidence from other webOS implementations (not C5 observations)
 
 [webos-iptv-player capture client](https://github.com/lennylxx/webos-iptv-player/blob/7d8fd30e927ee9d09ba7979b053f9a25ac932420/scripts/tv-capt-remote.js) contains a concrete reusable capture-handle lifecycle:
