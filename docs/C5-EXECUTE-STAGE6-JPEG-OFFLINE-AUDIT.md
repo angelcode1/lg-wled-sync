@@ -51,7 +51,7 @@ writes, logs or transmits image pixels. The operator supplies two
 previous transient frames. Symlinks, special files, unexpectedly
 large files and incomplete JPEGs are refused.
 
-The script uses Pillow **12.3.0** on the analysis computer, installed
+The script uses Pillow **11.3.0** on the analysis computer, installed
 in a private Python environment if it is not present. It is not a
 runtime dependency of the Rust TV executable.
 
