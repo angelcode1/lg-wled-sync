@@ -1,12 +1,18 @@
 # C5 Stage 7: owner-approved bounded two-frame comparison kit
 
-**Status 2026-10-18:** the owner explicitly approved **preparing**
-a Stage 7 test kit. Source implementation is complete and
+**Status 2026-10-18:** the owner-approved Stage 7 test kit was built;
 CI build **39131994753** passed:
 https://github.com/angelcode1/lg-wled-sync/actions/runs/39131994753
 
-No Stage 7 capture has been performed on the owner's C5 by this
-preparation. The existing Stage 1 installation is unchanged.
+**Owner-reported TV run, 2026-10-18:** the two bounded, known-clear
+320×180 JPEGs were produced and fully decoded on the Mac, and the
+original Stage 1 executable/LS2 policies passed independent SHA-256
+verification after restore. The Mac wrapper then exited with
+`SSH_PID: unbound variable` at line 356, **after** the successful
+stream/decode. Do not treat this trailing shell error as a failed
+capture or as proof that the remote scratch cleanup finished. See
+the measured-result and follow-up section below. The working original
+Stage 1 baseline was confirmed restored.
 
 ## Reproducible compiled artifact
 
@@ -122,3 +128,89 @@ the one-shot JPEG quality is not established by requesting
 sustained throughput or prove hardware capture is permitted on
 protected content. No production change should follow solely
 from this sample.
+
+## Owner-reported Stage 7 result and interpretation (2026-10-18)
+
+The operator supplied the following terminal markers after running the
+bounded kit on the real C5 against an owner-controlled clear source:
+
+```text
+C5_STAGE7_POLICY_VERIFIED own_name_only=true outbound_capture_only=true ACG=capture.client
+C5_STAGE7_TEMPORARY_ACG_GRANTED__BOUNDED_1_PLUS_1_CLEAR_FRAMES
+C5_HANDLE_CREATED kind=number no_frame_requested=true
+C5_HANDLE_CONFIGURED method=BLENDED format=JPEG width=320 height=180 execute=true
+C5_SINGLE_EXECUTE_VALID_JPEG width=320 height=180 bytes=7799 execute_ms=161 frames=1
+C5_HANDLE_DESTROYED returned_true=true
+C5_SINGLE_EXECUTE_PASS created=1 executed=1 destroyed=1 frame_retained=false
+C5_STAGE7_ONESHOT_FRAME width=320 height=180 bytes=14441 request_ms=160 staged_private=true quality75_requested=true quality75_verified=false
+C5_STAGE7_PAIR_READY native_frames=1 oneshot_frames=1 no_protected_fallback=true
+C5_STAGE7_PAIR_PASS__RESTORE_BEFORE_STREAMING
+C5_STAGE7_STAGE1_RESTORED_HASHES_PASS
+C5_STAGE7_TWO_FRAME_TAR_STREAMED
+C5_STAGE7_DECODE_PASS frames=2 full_decode=true raw_image_files_written=false
+c5-ls2-stage7-mac.sh: line 356: SSH_PID: unbound variable
+ABSENT=/var/home/root/c5-ls2-stage7-backup
+STAGE1_HASHES_PASS
+```
+
+The final independent `status` reported all four original Stage 1
+file hash checks as OK, and no Stage 7 backup directory. This verifies
+the installed Stage 1 baseline, not necessarily every scratch file's
+absence after the wrapper's abnormal exit.
+
+### Image quality evidence
+
+| Measurement | Native handle | One-shot |
+| --- | ---: | ---: |
+| JPEG bytes | 7,799 | 14,441 |
+| Request latency | 161 ms | 160 ms |
+| Dimensions | 320×180 | 320×180 |
+| Full JPEG decode | Yes | Yes |
+| Luminance standard deviation | 24.06 | 26.96 |
+| Mean luminance | 11.38 | 12.25 |
+| JPEG quantization fingerprint | `c560863d3b5ee431` | `df846ace420ab4c2` |
+
+Two-image comparison: mean absolute RGB difference **10.405**,
+PSNR **19.42 dB**, JPEG sampling matched but quantization tables
+**differed**; the requested one-shot JPEG quality level was **not
+verified**. Maximum per-channel centre-edge RGB differences were:
+top **3.29**, right **12.27**, bottom **1.26**, left **0.25**.
+Both frames passed the decoder's detail sanity check.
+
+These are comparisons between two decoded images, not measurements
+against an independent known RGB reference. The disparity at the right
+edge could reflect source motion/scene differences, JPEG settings,
+geometry/source-plane differences, or another confounder; none is
+established here. `source_identity_confirmed_by_code=false`.
+Do **not** infer equivalent encoders, pixel-level fidelity, stable
+continuous FPS, access to protected content, or production suitability
+from one pair. The two ~160 ms requests alone are not a throughput
+benchmark. Histogram functionality was not tested in this experiment.
+
+### Trailing Mac shell-script error and safe next actions
+
+The error `SSH_PID: unbound variable` is consistent with a shell
+executing with `set -u` and expanding an unset process variable
+in post-stream cleanup. The installer script was distributed in the
+separate Mac kit; it is **not tracked in this repository**, so the
+precise faulty line and the intended process lifecycle have not
+been independently inspected. Do not claim that the bundled installer
+has been fixed.
+
+Before any future on-device test:
+
+1. On the Mac, inspect the existing kit script around line 356:
+   `nl -ba c5-ls2-stage7-mac.sh | sed -n '330,370p'`.
+   Initialize optional subprocess PIDs before their first use and
+   guard each reference with `${SSH_PID:-}` where appropriate.
+   Do not kill a guessed PID or automatically rerun the capture.
+2. Read-only inspect the TV scratch namespace; independently check
+   for leftover `/tmp/c5-ls2-stage7-*` paths. Do not infer complete
+   scratch cleanup merely from a passing Stage 1 receipt.
+3. A cleanup-only change should be shipped as a **new checksum-pinned
+   Mac kit**, with shell syntax/lifecycle tests for cleanup before any
+   repeat experiment. Existing Stage 1, permissions, and production
+   behaviour should remain unchanged.
+
+All Stage 7 metrics quoted above derive from operator-provided terminal
+output, not from image files. No image was supplied to the repository.
