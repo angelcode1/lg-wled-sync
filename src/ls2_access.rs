@@ -4,6 +4,8 @@
 use anyhow::{bail, Context, Result};
 use libloading::{Library, Symbol};
 use std::ffi::{CStr, CString};
+use std::os::unix::fs::DirBuilderExt;
+use std::path::PathBuf;
 use std::ptr;
 use std::time::{Duration, Instant};
 
@@ -217,9 +219,51 @@ pub fn run(acknowledge: bool) -> Result<()> {
 /// This mutates an LG capture-service session, even though it does not
 /// set an output or execute a screenshot. Never called by the daemon.
 pub fn run_handle_lifecycle(acknowledge: bool) -> Result<()> {
+    run_handle_session(acknowledge, false)
+}
+
+/// Stage 4A: configure a private no-pixel output, then destroy the handle.
+/// NO execute call. Requires a separately approved temporary capture.client ACG.
+pub fn run_handle_configuration(acknowledge: bool) -> Result<()> {
+    run_handle_session(acknowledge, true)
+}
+
+struct ScopedOutputDir {
+    path: PathBuf,
+}
+impl ScopedOutputDir {
+    fn new() -> Result<Self> {
+        let path = PathBuf::from(format!("/tmp/lg-hue-sync-stage4-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .with_context(|| format!("cannot create fresh private temp directory {}", path.display()))?;
+        Ok(Self { path })
+    }
+    fn jpeg_path(&self) -> PathBuf {
+        self.path.join("single.jpg")
+    }
+}
+impl Drop for ScopedOutputDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn run_handle_session(acknowledge: bool, configure: bool) -> Result<()> {
     if !acknowledge {
+        if configure {
+            bail!("pass --acknowledge-handle-configuration before configuring an LG capture handle");
+        }
         bail!("pass --acknowledge-handle-lifecycle before creating an LG capture handle");
     }
+    // Fail before creating any LG handle if the output directory cannot
+    // be safely created with O_EXCL-like create_dir semantics (no reuse).
+    let scoped_output = if configure {
+        Some(ScopedOutputDir::new()?)
+    } else {
+        None
+    };
     let name = CString::new(NAME)?;
     let ls2 = unsafe { Library::new("libluna-service2.so.3") }
         .context("load native LS2 client library")?;
@@ -241,7 +285,7 @@ pub fn run_handle_lifecycle(acknowledge: bool) -> Result<()> {
         let context_unref: Symbol<'_, Unref> = glib.get(b"g_main_context_unref\0")?;
 
         let mut client: *mut libc::c_void = ptr::null_mut();
-        println!("C5_HANDLE_TEST_BEGIN client={NAME} max_handles=1 no_pixels=true");
+        println!("C5_HANDLE_TEST_BEGIN client={NAME} max_handles=1 config={configure} no_pixels=true");
         checked(*init, *free, "LS2_REGISTER", |err| {
             register(name.as_ptr(), &mut client, err)
         })?;
@@ -325,9 +369,39 @@ pub fn run_handle_lifecycle(acknowledge: bool) -> Result<()> {
                 }
             );
 
-            // Destroy before unregister: no properties, setOutput, execute.
-            let _ = request("destroyHandle", &serde_json::json!({"handle": handle}))?;
-            println!("C5_HANDLE_DESTROYED returned_true=true");
+            // These requests configure one capture session but explicitly
+            // never invoke execute or read pixel data. Always attempt
+            // destroyHandle even if any configuration call is rejected.
+            let config_result = (|| -> Result<()> {
+                if let Some(output) = scoped_output.as_ref() {
+                    let properties = serde_json::json!({
+                        "handle": handle,
+                        "properties": {
+                            "method": "BLENDED",
+                            "width": 320,
+                            "height": 180,
+                            "format": "JPEG"
+                        }
+                    });
+                    request("setProperties", &properties)?;
+                    request("setOptions", &serde_json::json!({
+                        "handle": handle,
+                        "options": {"jpegQuality": 75}
+                    }))?;
+                    request("setOutput", &serde_json::json!({
+                        "handle": handle,
+                        "file": {"path": output.jpeg_path()}
+                    }))?;
+                    println!("C5_HANDLE_CONFIGURED method=BLENDED format=JPEG width=320 height=180 no_execute=true");
+                }
+                Ok(())
+            })();
+            let destroy_result = request("destroyHandle", &serde_json::json!({"handle": handle}));
+            if destroy_result.is_ok() {
+                println!("C5_HANDLE_DESTROYED returned_true=true");
+            }
+            destroy_result.context("destroyHandle failed after configuration attempt")?;
+            config_result?;
             Ok(())
         })();
 
@@ -339,7 +413,11 @@ pub fn run_handle_lifecycle(acknowledge: bool) -> Result<()> {
         }
         cleanup_result.context("native Luna test must unregister cleanly")?;
         test_result?;
-        println!("C5_HANDLE_LIFECYCLE_PASS created=1 destroyed=1 no_pixels=true");
+        if configure {
+            println!("C5_HANDLE_CONFIGURATION_PASS created=1 configured=true destroyed=1 no_pixels=true");
+        } else {
+            println!("C5_HANDLE_LIFECYCLE_PASS created=1 destroyed=1 no_pixels=true");
+        }
     }
     Ok(())
 }
@@ -365,6 +443,7 @@ mod tests {
         assert!(!valid_capture_handle(&serde_json::json!("")));
         assert!(!valid_capture_handle(&serde_json::json!(-5)));
         assert!(run_handle_lifecycle(false).is_err());
+        assert!(run_handle_configuration(false).is_err());
     }
 
     #[test]
