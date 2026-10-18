@@ -66,9 +66,15 @@ pub fn run(acknowledge: bool, named_probe: bool) -> Result<()> {
             None
         };
         let label = if named_probe { "NAMED" } else { "ANONYMOUS" };
-        println!("LS2_{label}_ATTEMPT executable={executable} name={} private_bus=true capture=false",
-            name.as_ref().map_or("(null)", |_| OWN_PROBE_NAME));
-        let registered = register(name.as_ref().map_or(ptr::null(), |name| name.as_ptr()), &mut handle, &mut error);
+        println!(
+            "LS2_{label}_ATTEMPT executable={executable} name={} private_bus=true capture=false",
+            name.as_ref().map_or("(null)", |_| OWN_PROBE_NAME)
+        );
+        let registered = register(
+            name.as_ref().map_or(ptr::null(), |name| name.as_ptr()),
+            &mut handle,
+            &mut error,
+        );
         if !registered {
             let detail = error_details(&error);
             free(&mut error);
