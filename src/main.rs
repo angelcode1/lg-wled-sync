@@ -175,6 +175,12 @@ enum Commands {
         #[arg(long)]
         acknowledge_device_open: bool,
     },
+    /// Configure a single LG capture handle without calling execute or reading pixels.
+    TestLs2HandleConfiguration {
+        /// Acknowledge a temporary no-pixel LG capture configuration test.
+        #[arg(long)]
+        acknowledge_handle_configuration: bool,
+    },
     /// Create and destroy exactly one LG capture handle; no output or pixels.
     TestLs2HandleLifecycle {
         /// Acknowledge a stateful LG capture-service session test.
@@ -293,6 +299,9 @@ async fn main() -> Result<()> {
         Commands::TestV4l2CurrentFormat {
             acknowledge_device_open,
         } => run_test_v4l2_current_format(acknowledge_device_open),
+        Commands::TestLs2HandleConfiguration {
+            acknowledge_handle_configuration,
+        } => ls2_access::run_handle_configuration(acknowledge_handle_configuration),
         Commands::TestLs2HandleLifecycle {
             acknowledge_handle_lifecycle,
         } => ls2_access::run_handle_lifecycle(acknowledge_handle_lifecycle),
