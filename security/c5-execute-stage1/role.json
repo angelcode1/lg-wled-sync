@@ -1,0 +1,15 @@
+{
+  "exeName": "/var/home/root/c5-ls2-probe",
+  "type": "regular",
+  "trustLevel": "dev",
+  "allowedNames": [
+    "org.webosbrew.lg-hue-sync.c5-probe"
+  ],
+  "permissions": [
+    {
+      "service": "org.webosbrew.lg-hue-sync.c5-probe",
+      "inbound": [],
+      "outbound": []
+    }
+  ]
+}
