@@ -1,8 +1,50 @@
-# C5 Stage 4B — single known-clear native execute (NOT run or approved)
+# C5 Stage 4B — first attempt refused before capture (safe)
 
-**State on the owner's TV:** Stage 4A passed and the exact Stage 1
-files, binary and restricted permissions were restored. The Stage 4B
-code exists only in the repository. No new capture has been requested.
+**State on the owner's TV:** Stage 4A passed. Stage 4B was approved and
+attempted once on 2026-10-18, but **its independent media classifier did
+not return Clear**, so the diagnostic exited before LS2 registration,
+before `createHandle`, and before `execute`. Its installer restored
+the original Stage 1 executable and non-capture policy and verified all
+stored SHA-256 hashes. No additional capture was requested.
+
+## Actual first Stage 4B execution — NO CAPTURE
+
+The user-provided Mac installer output included:
+
+```text
+STAGE1_HASHES_PASS
+C5_STAGE4B_POLICY_VERIFIED own_name_only=true outbound_capture_only=true ACG=capture.client
+C5_STAGE4B_TEMPORARY_ACG_GRANTED__SINGLE_CLEAR_FRAME_ONLY
+Error: C5_EXECUTE_REFUSE_MEDIA_NOT_CLEAR: no capture requested
+C5_STAGE4B_EXECUTE_FAILED_OR_NOT_CLEAR__RESTORING_STAGE1
+C5_STAGE4B_RESTORING_STAGE1_AFTER_TEST
+C5_STAGE1_RESTORED_AND_RESCANNED
+STAGE1_HASHES_PASS
+```
+
+The final independent `status` check also reported
+`ABSENT=/var/home/root/c5-ls2-stage4b-backup`.
+This failure happened at the **initial clear-media classification
+preflight**, before the code prints `C5_HANDLE_TEST_BEGIN`.
+Therefore, this run created **no capture handle**, issued **no
+`execute`**, and generated **no JPEG**. The installer's generic
+"server-side handle cleanup may be unknown" message is inapplicable
+to this particular pre-handle refusal; no orphan handle was created.
+
+The raw `com.webos.media/getActivePipelines` reply was not logged,
+so the underlying cause remains **undetermined**. The Rust classifier
+returns `Clear` only for a well-formed foreground `type:"media"`
+pipeline containing `VDEC`, with no `SVP_CPB` resource anywhere;
+all HDMIs, idle and unknown shapes, failed/slow interactive Luna
+requests, and potentially clear content not represented in this
+resource format yield `Unknown`. A protected pipeline reports
+`Protected`. No independent evidence yet distinguishes these cases.
+
+**Next step (read-only, no ACG grant):** inspect a bounded live
+`getActivePipelines {}` reply while the intended local video plays,
+using the TV's `luna-send -i -f` with open stdin. Redact paths/titles
+before sharing. Do **not** change the DRM classifier to classify HDMI
+or Unknown as Clear, and do not retry Stage 4B automatically.
 
 ## Confirmed LG C5 prerequisites (2026-10-18)
 
@@ -85,6 +127,7 @@ calls. Never widen or spoof service names, ACGs or LG roles.
   process CPU and LG's `captureservice` CPU. Keep the production
   `executeOneShot` path unchanged until results justify replacement.
 
-**Stage 4B requires new explicit user approval** before deploying
-the temporary ACG or running this frame test. The Stage 4A approval
-did not cover an `execute` call.
+Stage 4B was expressly approved once. That attempt was blocked at the
+preflight and the TV was rolled back. Any retry must first establish why
+the independent media classifier did not return `Clear`; do not
+broaden `capture.client` beyond its known, temporary scope.
