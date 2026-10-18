@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 const ONESHOT_URI: &str = "luna://com.webos.service.capture/executeOneShot";
 
 fn output_dir() -> Result<PathBuf> {
-    let supplied = std::env::var_os("C5_STAGE7_OUTPUT_DIR")
-        .context("C5_STAGE7_REFUSE_OUTPUT_DIR_MISSING")?;
+    let supplied =
+        std::env::var_os("C5_STAGE7_OUTPUT_DIR").context("C5_STAGE7_REFUSE_OUTPUT_DIR_MISSING")?;
     let dir = PathBuf::from(supplied);
     let base = dir
         .parent()
@@ -78,11 +78,9 @@ pub async fn run(acknowledge: bool) -> Result<()> {
     }
     let native = dir.join("native.jpg");
     let runtime = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || {
-        ls2_access::run_stage7_native_clear_frame(runtime, native)
-    })
-    .await
-    .context("C5_STAGE7_NATIVE_JOIN_FAILED")??;
+    tokio::task::spawn_blocking(move || ls2_access::run_stage7_native_clear_frame(runtime, native))
+        .await
+        .context("C5_STAGE7_NATIVE_JOIN_FAILED")??;
 
     // The previous native LS2 handle was destroyed and client unregistered.
     // A changed, unavailable or ambiguous media classification aborts.
