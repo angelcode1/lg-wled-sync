@@ -237,7 +237,12 @@ impl ScopedOutputDir {
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&path)
-            .with_context(|| format!("cannot create fresh private temp directory {}", path.display()))?;
+            .with_context(|| {
+                format!(
+                    "cannot create fresh private temp directory {}",
+                    path.display()
+                )
+            })?;
         Ok(Self { path })
     }
     fn jpeg_path(&self) -> PathBuf {
@@ -253,7 +258,9 @@ impl Drop for ScopedOutputDir {
 fn run_handle_session(acknowledge: bool, configure: bool) -> Result<()> {
     if !acknowledge {
         if configure {
-            bail!("pass --acknowledge-handle-configuration before configuring an LG capture handle");
+            bail!(
+                "pass --acknowledge-handle-configuration before configuring an LG capture handle"
+            );
         }
         bail!("pass --acknowledge-handle-lifecycle before creating an LG capture handle");
     }
@@ -285,7 +292,9 @@ fn run_handle_session(acknowledge: bool, configure: bool) -> Result<()> {
         let context_unref: Symbol<'_, Unref> = glib.get(b"g_main_context_unref\0")?;
 
         let mut client: *mut libc::c_void = ptr::null_mut();
-        println!("C5_HANDLE_TEST_BEGIN client={NAME} max_handles=1 config={configure} no_pixels=true");
+        println!(
+            "C5_HANDLE_TEST_BEGIN client={NAME} max_handles=1 config={configure} no_pixels=true"
+        );
         checked(*init, *free, "LS2_REGISTER", |err| {
             register(name.as_ptr(), &mut client, err)
         })?;
@@ -384,14 +393,20 @@ fn run_handle_session(acknowledge: bool, configure: bool) -> Result<()> {
                         }
                     });
                     request("setProperties", &properties)?;
-                    request("setOptions", &serde_json::json!({
-                        "handle": handle,
-                        "options": {"jpegQuality": 75}
-                    }))?;
-                    request("setOutput", &serde_json::json!({
-                        "handle": handle,
-                        "file": {"path": output.jpeg_path()}
-                    }))?;
+                    request(
+                        "setOptions",
+                        &serde_json::json!({
+                            "handle": handle,
+                            "options": {"jpegQuality": 75}
+                        }),
+                    )?;
+                    request(
+                        "setOutput",
+                        &serde_json::json!({
+                            "handle": handle,
+                            "file": {"path": output.jpeg_path()}
+                        }),
+                    )?;
                     println!("C5_HANDLE_CONFIGURED method=BLENDED format=JPEG width=320 height=180 no_execute=true");
                 }
                 Ok(())
@@ -414,7 +429,9 @@ fn run_handle_session(acknowledge: bool, configure: bool) -> Result<()> {
         cleanup_result.context("native Luna test must unregister cleanly")?;
         test_result?;
         if configure {
-            println!("C5_HANDLE_CONFIGURATION_PASS created=1 configured=true destroyed=1 no_pixels=true");
+            println!(
+                "C5_HANDLE_CONFIGURATION_PASS created=1 configured=true destroyed=1 no_pixels=true"
+            );
         } else {
             println!("C5_HANDLE_LIFECYCLE_PASS created=1 destroyed=1 no_pixels=true");
         }
