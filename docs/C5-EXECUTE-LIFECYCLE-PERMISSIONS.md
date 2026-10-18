@@ -110,11 +110,13 @@ Next safe inspection: read the TV's actual
 `/usr/share/luna-service2/roles.d/com.webos.lunasend.role.json`
 metadata, and check installed third-party LS2 role directories
 `/var/luna-service2` / `/var/luna-service2-dev` by **name/metadata only**
-to map policy lookup (no policy changes). The existing daemon/frontend
-bundling and `webos-app/appinfo.json` currently have a broad legacy
-`requiredPermissions: ["all"]` declaration that must not be treated
-as proof of correct native permissions. Audit and replace it with
-least-privilege frontend permissions before installation.
+to map policy lookup (no policy changes). The legacy webOS dashboard app previously declared
+`requiredPermissions: ["all"]` even though its single HTML entry point
+only checks the local HTTP daemon and navigates to it. The development
+branch now **omits that unnecessary request**. This changes the
+front-end app manifest only; it does **not** grant any Luna permissions
+to our native Rust executable or prove the private capture APIs work.
+The dashboard change needs validation on real webOS after packaging.
 
 ## Evidence from other webOS implementations (not C5 observations)
 
