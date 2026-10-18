@@ -77,6 +77,10 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/c5-jpeg-audit-venv"
           "$RUNNER_TEMP/c5-jpeg-audit-venv/bin/python" -m pip install --disable-pip-version-check "Pillow==11.3.0"
           "$RUNNER_TEMP/c5-jpeg-audit-venv/bin/python" scripts/c5_jpeg_audit.py --selftest
+      - name: Stage 7 synthetic perimeter colour fidelity (offline only)
+        run: |
+          python3 -m py_compile scripts/c5_stage7_edge_fidelity.py
+          "$RUNNER_TEMP/c5-jpeg-audit-venv/bin/python" scripts/c5_stage7_edge_fidelity.py --selftest
       - name: Test LG native C++ exception boundary
         run: |
           c++ -std=c++11 -Wall -Wextra -Werror -O2 \
