@@ -24,17 +24,10 @@ struct LunaError {
 
 type Init = unsafe extern "C" fn(*mut LunaError) -> bool;
 type Free = unsafe extern "C" fn(*mut LunaError);
-type Register = unsafe extern "C" fn(
-    *const libc::c_char,
-    *mut *mut libc::c_void,
-    *mut LunaError,
-) -> bool;
+type Register =
+    unsafe extern "C" fn(*const libc::c_char, *mut *mut libc::c_void, *mut LunaError) -> bool;
 type Unregister = unsafe extern "C" fn(*mut libc::c_void, *mut LunaError) -> bool;
-type Attach = unsafe extern "C" fn(
-    *mut libc::c_void,
-    *mut libc::c_void,
-    *mut LunaError,
-) -> bool;
+type Attach = unsafe extern "C" fn(*mut libc::c_void, *mut libc::c_void, *mut LunaError) -> bool;
 type Callback =
     unsafe extern "C" fn(*mut libc::c_void, *mut libc::c_void, *mut libc::c_void) -> bool;
 type CallOneReply = unsafe extern "C" fn(
