@@ -175,6 +175,12 @@ enum Commands {
         #[arg(long)]
         acknowledge_device_open: bool,
     },
+    /// Request one 320x180 JPEG from LG's persistent capture handle, only for stable Clear media.
+    TestLs2SingleClearExecute {
+        /// Confirm temporary one-frame capture. Protected/unknown media always refuse.
+        #[arg(long)]
+        acknowledge_single_clear_execute: bool,
+    },
     /// Configure a single LG capture handle without calling execute or reading pixels.
     TestLs2HandleConfiguration {
         /// Acknowledge a temporary no-pixel LG capture configuration test.
@@ -299,6 +305,9 @@ async fn main() -> Result<()> {
         Commands::TestV4l2CurrentFormat {
             acknowledge_device_open,
         } => run_test_v4l2_current_format(acknowledge_device_open),
+        Commands::TestLs2SingleClearExecute {
+            acknowledge_single_clear_execute,
+        } => ls2_access::run_one_clear_execute(acknowledge_single_clear_execute).await,
         Commands::TestLs2HandleConfiguration {
             acknowledge_handle_configuration,
         } => ls2_access::run_handle_configuration(acknowledge_handle_configuration),
