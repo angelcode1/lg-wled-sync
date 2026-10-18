@@ -175,6 +175,12 @@ enum Commands {
         #[arg(long)]
         acknowledge_device_open: bool,
     },
+    /// Create and destroy exactly one LG capture handle; no output or pixels.
+    TestLs2HandleLifecycle {
+        /// Acknowledge a stateful LG capture-service session test.
+        #[arg(long)]
+        acknowledge_handle_lifecycle: bool,
+    },
     /// Query LG's read-only capture capability using our own native LS2 identity.
     /// Requires separately approved, narrowly scoped capture.client permission.
     TestLs2CapturePermission {
@@ -287,6 +293,9 @@ async fn main() -> Result<()> {
         Commands::TestV4l2CurrentFormat {
             acknowledge_device_open,
         } => run_test_v4l2_current_format(acknowledge_device_open),
+        Commands::TestLs2HandleLifecycle {
+            acknowledge_handle_lifecycle,
+        } => ls2_access::run_handle_lifecycle(acknowledge_handle_lifecycle),
         Commands::TestLs2CapturePermission {
             acknowledge_capture_permission_check,
         } => ls2_access::run(acknowledge_capture_permission_check),
