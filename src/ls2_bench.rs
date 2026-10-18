@@ -157,7 +157,9 @@ struct ServiceCpu {
 }
 
 fn parse_service_stat(pid: u32, raw: &str) -> Result<ServiceCpu> {
-    let (_, tail) = raw.rsplit_once(") ").context("invalid proc stat process name")?;
+    let (_, tail) = raw
+        .rsplit_once(") ")
+        .context("invalid proc stat process name")?;
     let fields: Vec<&str> = tail.split_whitespace().collect();
     if fields.len() < 20 {
         bail!("proc stat missing fields");
@@ -176,8 +178,7 @@ fn get_capture_service() -> Result<ServiceCpu> {
     for entry in fs::read_dir("/proc").context("cannot read /proc")? {
         let entry = entry?;
         let filename = entry.file_name();
-        let Some(pid) = filename.to_str().and_then(|v| v.parse::<u32>().ok())
-        else {
+        let Some(pid) = filename.to_str().and_then(|v| v.parse::<u32>().ok()) else {
             continue;
         };
         let base = entry.path();
@@ -229,14 +230,18 @@ impl CpuSnapshot {
 }
 
 fn print_cpu(phase: &str, start: &CpuSnapshot, end: &CpuSnapshot, clock_hz: i64) -> Result<()> {
-    if start.service.pid != end.service.pid
-        || start.service.start_time != end.service.start_time
-    {
+    if start.service.pid != end.service.pid || start.service.start_time != end.service.start_time {
         bail!("C5_STAGE5_REFUSE_CAPTURE_SERVICE_RESTARTED");
     }
     let wall_ms = end.wall.duration_since(start.wall).as_millis().max(1);
-    let rust_us = end.rust_us.checked_sub(start.rust_us).context("Rust CPU counter reset")?;
-    let child_us = end.child_us.checked_sub(start.child_us).context("child CPU counter reset")?;
+    let rust_us = end
+        .rust_us
+        .checked_sub(start.rust_us)
+        .context("Rust CPU counter reset")?;
+    let child_us = end
+        .child_us
+        .checked_sub(start.child_us)
+        .context("child CPU counter reset")?;
     let ticks = end
         .service
         .total_ticks
