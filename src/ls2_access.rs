@@ -1,7 +1,7 @@
 //! Bounded, no-pixel C5 LS2 capture-method authorization test.
 //! Calls ONLY com.webos.service.capture/getCapability with {} using the
 //! application's own named LS2 handle, not the privileged luna-send binary.
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use libloading::{Library, Symbol};
 use std::ffi::{CStr, CString};
 use std::ptr;
