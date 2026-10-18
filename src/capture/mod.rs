@@ -9,7 +9,7 @@ pub mod v4l2_metadata;
 pub mod vtcapture;
 
 use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 pub struct CapturedFrame<'a> {
     pub data: &'a [u8],
