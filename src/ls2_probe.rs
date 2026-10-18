@@ -1,8 +1,8 @@
-//! Anonymous LS2 private-bus registration probe. No capture, media, or
+//! LS2 private-bus registration probe (anonymous or own name). No capture, media, or
 //! borrowed LG service identity. This is not a test of capture.client rights.
 use anyhow::{anyhow, bail, Context, Result};
 use libloading::{Library, Symbol};
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::ptr;
 
 /// From webOS Luna C API LSError layout (32-bit ABI).
@@ -23,6 +23,9 @@ type RegisterPrivate =
     unsafe extern "C" fn(*const libc::c_char, *mut *mut libc::c_void, *mut LunaError) -> bool;
 type Unregister = unsafe extern "C" fn(*mut libc::c_void, *mut LunaError) -> bool;
 
+/// Our exact standalone probe identity, never an LG/vendor-owned name.
+const OWN_PROBE_NAME: &str = "org.webosbrew.lg-hue-sync.c5-probe";
+
 fn error_details(error: &LunaError) -> String {
     let message = if error.message.is_null() {
         "(no LSError message)".to_owned()
@@ -35,9 +38,10 @@ fn error_details(error: &LunaError) -> String {
     format!("code={} message={message}", error.error_code)
 }
 
-/// Opens and immediately closes an anonymous LS2 client, with no calls to
-/// media, capture, permission management, or registered LG service names.
-pub fn run(acknowledge: bool) -> Result<()> {
+/// Opens and closes either an anonymous client or our exact independently
+/// registered probe name. No capture, media, or permission-management calls.
+/// A separate user-reviewed executable role is required for named mode.
+pub fn run(acknowledge: bool, named_probe: bool) -> Result<()> {
     if !acknowledge {
         bail!("LS2 registration is active; pass --acknowledge-luna-registration");
     }
@@ -56,30 +60,36 @@ pub fn run(acknowledge: bool) -> Result<()> {
             bail!("LSErrorInit refused initialization");
         }
         let mut handle: *mut libc::c_void = ptr::null_mut();
-        println!("LS2_ANONYMOUS_ATTEMPT executable={executable} private_bus=true capture=false");
-        // Null service name is the ordinary anonymous-client registration.
-        let registered = register(ptr::null(), &mut handle, &mut error);
+        let name = if named_probe {
+            Some(CString::new(OWN_PROBE_NAME).expect("static probe name contains no NUL"))
+        } else {
+            None
+        };
+        let label = if named_probe { "NAMED" } else { "ANONYMOUS" };
+        println!("LS2_{label}_ATTEMPT executable={executable} name={} private_bus=true capture=false",
+            name.as_ref().map_or("(null)", |_| OWN_PROBE_NAME));
+        let registered = register(name.as_ref().map_or(ptr::null(), |name| name.as_ptr()), &mut handle, &mut error);
         if !registered {
             let detail = error_details(&error);
             free(&mut error);
-            bail!("LS2_ANONYMOUS_REJECTED {detail}");
+            bail!("LS2_{label}_REJECTED {detail}");
         }
         free(&mut error);
         if handle.is_null() {
-            bail!("LS2_ANONYMOUS_INVALID_HANDLE after reported registration");
+            bail!("LS2_{label}_INVALID_HANDLE after reported registration");
         }
         let mut cleanup_error: LunaError = std::mem::zeroed();
         if !init(&mut cleanup_error) {
-            bail!("LS2_ANONYMOUS_CLEANUP_ERROR failed to initialize error context");
+            bail!("LS2_{label}_CLEANUP_ERROR failed to initialize error context");
         }
         let ok = unregister(handle, &mut cleanup_error);
         if !ok {
             let detail = error_details(&cleanup_error);
             free(&mut cleanup_error);
-            return Err(anyhow!("LS2_ANONYMOUS_UNREGISTER_FAILED {detail}"));
+            return Err(anyhow!("LS2_{label}_UNREGISTER_FAILED {detail}"));
         }
         free(&mut cleanup_error);
-        println!("LS2_ANONYMOUS_OK registered=true unregistered=true capture=false");
+        println!("LS2_{label}_OK registered=true unregistered=true capture=false");
     }
     Ok(())
 }
@@ -90,7 +100,8 @@ mod tests {
 
     #[test]
     fn requires_explicit_acknowledgement_before_loading_luna() {
-        let message = run(false).unwrap_err().to_string();
+        let message = run(false, false).unwrap_err().to_string();
+        assert!(run(false, true).is_err());
         assert!(message.contains("--acknowledge-luna-registration"));
     }
 }
