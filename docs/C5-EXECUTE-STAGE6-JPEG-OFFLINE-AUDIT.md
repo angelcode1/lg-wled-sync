@@ -76,7 +76,7 @@ protected. No system should turn these diagnostics into a DRM bypass.
 ## CI and device state
 
 `.github/workflows/ci.yml` runs the synthetic-only test with
-Pillow 12.3.0 inside a temporary Ubuntu virtualenv, then the usual
+Pillow 11.3.0 inside a temporary Ubuntu virtualenv, then the usual
 Rust formatting, tests, Clippy and ARMv7 build. The native diagnostic
 label `max_frames` was fixed to reflect its actual configured
 frame limit, without changing capture or policy semantics.
