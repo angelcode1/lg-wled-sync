@@ -229,7 +229,12 @@ impl CpuSnapshot {
     }
 }
 
-fn print_cpu(phase: &str, start: &CpuSnapshot, end: &CpuSnapshot, clock_hz: libc::c_long) -> Result<()> {
+fn print_cpu(
+    phase: &str,
+    start: &CpuSnapshot,
+    end: &CpuSnapshot,
+    clock_hz: libc::c_long,
+) -> Result<()> {
     if start.service.pid != end.service.pid || start.service.start_time != end.service.start_time {
         bail!("C5_STAGE5_REFUSE_CAPTURE_SERVICE_RESTARTED");
     }
