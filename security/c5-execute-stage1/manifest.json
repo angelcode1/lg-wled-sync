@@ -1,0 +1,11 @@
+{
+  "id": "org.webosbrew.lg-hue-sync.c5-probe",
+  "version": "1.0.0",
+  "roleFiles": [
+    "/var/luna-service2/roles.d/org.webosbrew.lg-hue-sync.c5-probe.role.json"
+  ],
+  "serviceFiles": [],
+  "clientPermissionFiles": [],
+  "apiPermissionFiles": [],
+  "groupsFiles": []
+}
