@@ -56,9 +56,7 @@ pub fn run(acknowledge: bool) -> Result<()> {
             bail!("LSErrorInit refused initialization");
         }
         let mut handle: *mut libc::c_void = ptr::null_mut();
-        println!(
-            "LS2_ANONYMOUS_ATTEMPT executable={executable} private_bus=true capture=false"
-        );
+        println!("LS2_ANONYMOUS_ATTEMPT executable={executable} private_bus=true capture=false");
         // Null service name is the ordinary anonymous-client registration.
         let registered = register(ptr::null(), &mut handle, &mut error);
         if !registered {
