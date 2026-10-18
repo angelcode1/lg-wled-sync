@@ -4,6 +4,7 @@ mod config;
 mod hue;
 mod local_http;
 mod ls2_access;
+mod ls2_bench;
 mod ls2_probe;
 mod nanoleaf;
 mod output;
@@ -175,6 +176,12 @@ enum Commands {
         #[arg(long)]
         acknowledge_device_open: bool,
     },
+    /// Five native frames versus five one-shot JPEGs, known-Clear local video only.
+    BenchLs2ClearSession {
+        /// Explicit consent to bounded capture and per-process CPU measurements.
+        #[arg(long)]
+        acknowledge_stage5_clear_benchmark: bool,
+    },
     /// Request one 320x180 JPEG from LG's persistent capture handle, only for stable Clear media.
     TestLs2SingleClearExecute {
         /// Confirm temporary one-frame capture. Protected/unknown media always refuse.
@@ -305,6 +312,9 @@ async fn main() -> Result<()> {
         Commands::TestV4l2CurrentFormat {
             acknowledge_device_open,
         } => run_test_v4l2_current_format(acknowledge_device_open),
+        Commands::BenchLs2ClearSession {
+            acknowledge_stage5_clear_benchmark,
+        } => ls2_bench::run(acknowledge_stage5_clear_benchmark).await,
         Commands::TestLs2SingleClearExecute {
             acknowledge_single_clear_execute,
         } => ls2_access::run_one_clear_execute(acknowledge_single_clear_execute).await,
