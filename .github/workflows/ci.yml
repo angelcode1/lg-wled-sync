@@ -67,6 +67,10 @@ jobs:
         run: python3 -m unittest discover -s scripts -p test_c5_profile_import.py -v
       - name: Validate C5 LS2 registration-only role (offline)
         run: python3 -m unittest discover -s scripts -p test_c5_ls2_role.py -v
+      - name: Static C5 histogram and lighting inventory selftest (no TV access)
+        run: |
+          python3 -m py_compile scripts/c5_lighting_interface_inventory.py
+          python3 scripts/c5_lighting_interface_inventory.py --selftest
       - name: Stage 6 synthetic JPEG decode and quality audit (offline only)
         run: |
           python3 -m py_compile scripts/c5_jpeg_audit.py
