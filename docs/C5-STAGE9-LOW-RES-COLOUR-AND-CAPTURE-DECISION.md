@@ -68,3 +68,33 @@ If a legitimately supported fast path is ever found, retain an independently ver
 4. A future owner-approved device benchmark, if needed, must separately establish known-clear source identity, codec/matrix equivalence, exact process permission, clean teardown, baseline restoration, p50/p95/p99 end-to-end capture age and CPU. No device test is authorized by this document.
 
 **Promotion gate:** independent bright reference and orientation accuracy, source provenance, valid pixel ownership, verified permission, sustainable freshness and CPU use, and owner approval. Until then preserve the Stage 1 state and production DRM routing.
+
+## Public-interface cross-check (2026-10-19; no device test)
+
+The official **webOS OSE** `com.webos.surfacemanager/captureCompositorOutput`
+reference labels its ACG `surfacemanager.devutility` and explicitly says
+the utility is intended for privileged components, not public use. It
+also warns that its screenshot is restricted to **what the surface
+manager composes** and *may omit video*. webOS OSE documentation is not
+a blanket API/entitlement guarantee for consumer webOS TV firmware.
+This strengthens the **UI-only until proven otherwise** classification
+for a compositor/HAL candidate; do not create or grant that ACG or
+invoke the method on this C5 merely because a public reference exists.
+
+Community `webosbrew/hyperion-webos` documentation likewise treats
+`libhalgal`/older `libgm` as **UI** capture sources separate from
+`libvtcapture`/older `libdile_vt` **video** sources. Its historical
+high-FPS anecdotes are hardware/version-specific and do not supersede
+the C5 vendor hash, unsafe immediate-requeue pointer semantics or
+owner-approved clear-only LS2 gate. Do not enable Hyperion force-capture
+quirks or unsupported source fallbacks to chase headline frame rates.
+
+Public references:
+
+- https://www.webosose.org/docs/reference/ls2-api/com-webos-surfacemanager/
+- https://github.com/webosbrew/hyperion-webos/blob/main/README.md
+
+**Decision refinement:** prioritize an authorized, independently validated
+**video-capable** source with explicit frame ownership and age over a
+compositor API that may offer fast but UI-only pixels. Preserve the
+separation of UI and video coverage in every benchmark report.
