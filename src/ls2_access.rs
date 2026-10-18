@@ -182,8 +182,8 @@ pub fn run(acknowledge: bool) -> Result<()> {
             if let Some(payload) = reply.received.as_deref() {
                 completed = true;
                 println!("LS2_GETCAPABILITY_REPLY {payload}");
-                let json: serde_json::Value = serde_json::from_str(payload)
-                    .context("LS2_GETCAPABILITY_INVALID_JSON")?;
+                let json: serde_json::Value =
+                    serde_json::from_str(payload).context("LS2_GETCAPABILITY_INVALID_JSON")?;
                 if json.get("returnValue").and_then(serde_json::Value::as_bool) != Some(true) {
                     bail!("LS2_GETCAPABILITY_NOT_AUTHORIZED_OR_REJECTED: {payload}");
                 }
