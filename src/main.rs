@@ -234,7 +234,16 @@ async fn main() -> Result<()> {
             interval_ms,
             width,
             height,
-        } => run_bench_blended(acknowledge_clear_capture, samples, interval_ms, width, height).await,
+        } => {
+            run_bench_blended(
+                acknowledge_clear_capture,
+                samples,
+                interval_ms,
+                width,
+                height,
+            )
+            .await
+        }
         Commands::TestHistogram {
             acknowledge_native_capture,
             samples,
@@ -2221,18 +2230,24 @@ async fn run_bench_blended(
     height: u32,
 ) -> Result<()> {
     if !acknowledge_clear_capture {
-        return Err(anyhow!("bench-blended requires --acknowledge-clear-capture"));
+        return Err(anyhow!(
+            "bench-blended requires --acknowledge-clear-capture"
+        ));
     }
     if !(1..=30).contains(&samples) || interval_ms > 2000 {
         return Err(anyhow!("samples must be 1..=30, interval-ms 0..=2000"));
     }
     if width == 0 || height == 0 || width > 640 || height > 360 {
-        return Err(anyhow!("BLENDED benchmark dimensions must fit within 640x360"));
+        return Err(anyhow!(
+            "BLENDED benchmark dimensions must fit within 640x360"
+        ));
     }
     // A Clear result must be sustained, not a single transient sample.
     for _ in 0..3 {
         if capture::media::query().await != PlaybackClass::Clear {
-            return Err(anyhow!("source not independently classified Clear; no captures started"));
+            return Err(anyhow!(
+                "source not independently classified Clear; no captures started"
+            ));
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
@@ -2296,9 +2311,8 @@ async fn run_bench_blended(
 
     let wall_ms = wall_start.elapsed().as_millis();
     let cpu_delta = cpu_start.zip(cpu_us()).map(|(a, b)| b.saturating_sub(a));
-    let rust_cpu_pct = cpu_delta.map(|value| {
-        value as f64 * 100.0 / (wall_ms.max(1) as f64 * 1000.0)
-    });
+    let rust_cpu_pct =
+        cpu_delta.map(|value| value as f64 * 100.0 / (wall_ms.max(1) as f64 * 1000.0));
     info!(
         "BLENDED_BENCH_DONE frames={} elapsed_ms={} measured_fps={:.2} mean_request_ms={:.1} mean_decode_ms={:.1} rust_process_cpu_pct={:?} (LG captureservice CPU excluded)",
         completed,
