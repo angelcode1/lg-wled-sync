@@ -1,5 +1,6 @@
 pub mod blended;
-pub mod dile_vt;
+pub mod mock;
+pub mod source_fps;
 pub mod drm_routing;
 pub mod histogram;
 pub mod luna_client;
@@ -99,66 +100,31 @@ pub trait ScreenCapture {
     }
 }
 
-pub use dile_vt::{detect_source_fps, DileVtCapture, MockCapture};
+pub use mock::MockCapture;
+pub use source_fps::detect_source_fps;
 pub use vtcapture::VtCapture;
 
-/// Creates a screen capture instance, prioritizing libvtcapture (webOS 6.x / C1 OLED),
-/// falling back to dile_vt, and finally to MockCapture.
+/// webOS 6+ native capture. Never falls back to the obsolete libdile_vt
+/// ABI on newer firmware; use the separately guarded LG-managed BLENDED
+/// screenshot path when native VT cannot provide a safe frame.
 pub fn create_capture(width: u32, height: u32) -> Box<dyn ScreenCapture> {
-    // 1. Try modern webOS libvtcapture (/usr/lib/libvtcapture.so.1)
     match VtCapture::try_new(width, height) {
         Ok(capture) => {
-            info!("Initialized VtCapture driver (/usr/lib/libvtcapture.so.1) successfully.");
-            return Box::new(capture);
+            info!("Initialized guarded webOS 6+ libvtcapture.");
+            Box::new(capture)
         }
-        Err(e) => {
-            if e.downcast_ref::<NativeCaptureError>()
+        Err(error) => {
+            if error
+                .downcast_ref::<NativeCaptureError>()
                 .is_some_and(NativeCaptureError::is_busy)
             {
-                error!(
-                    "[-] Capture device is BUSY: /dev/video* hardware scaler is in use by another process (e.g. lg-hue-sync.service). Stop it before starting a manual capture session: systemctl stop lg-hue-sync"
-                );
+                warn!("VT capture busy; not taking ownership from other LG clients");
             } else {
-                warn!(
-                    "VtCapture not available on this platform ({}). Trying DileVtCapture...",
-                    e
-                );
+                warn!("Guarded native VT unavailable: {error:#}");
             }
+            Box::new(MockCapture::new(width, height))
         }
     }
-
-    // A known C5 ELF is not the older C1/DILE platform. If its guarded VT
-    // frame path failed, do not execute a legacy vendor backend without an
-    // independently audited ABI/permission model.
-    if histogram::is_known_c5_vendor_elf() {
-        warn!("LG C5 guarded frame backend unavailable; legacy DILE fallback disabled for this exact ELF");
-        return Box::new(MockCapture::new(width, height));
-    }
-
-    // 2. Try legacy libdile_vt (/usr/lib/libdile_vt.so.0)
-    match DileVtCapture::try_new(width, height, 0) {
-        Ok(capture) => {
-            info!("Initialized DileVtCapture driver (/usr/lib/libdile_vt.so.0) successfully.");
-            return Box::new(capture);
-        }
-        Err(e) => {
-            if e.downcast_ref::<NativeCaptureError>()
-                .is_some_and(NativeCaptureError::is_busy)
-            {
-                error!(
-                    "[-] DileVtCapture device is BUSY: /dev/video* is in use by another process."
-                );
-            } else {
-                warn!(
-                    "DileVtCapture not available on this platform ({}). Falling back to MockCapture.",
-                    e
-                );
-            }
-        }
-    }
-
-    // 3. Fallback to synthetic MockCapture (host macOS, tests, CI)
-    Box::new(MockCapture::new(width, height))
 }
 
 #[cfg(test)]
