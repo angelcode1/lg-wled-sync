@@ -213,9 +213,155 @@ pub fn run(acknowledge: bool) -> Result<()> {
     Ok(())
 }
 
+
+/// Exactly one createHandle {} followed by destroyHandle {handle}.
+/// This mutates an LG capture-service session, even though it does not
+/// set an output or execute a screenshot. Never called by the daemon.
+pub fn run_handle_lifecycle(acknowledge: bool) -> Result<()> {
+    if !acknowledge {
+        bail!("pass --acknowledge-handle-lifecycle before creating an LG capture handle");
+    }
+    let name = CString::new(NAME)?;
+    let ls2 = unsafe { Library::new("libluna-service2.so.3") }
+        .context("load native LS2 client library")?;
+    let glib =
+        unsafe { Library::new("libglib-2.0.so.0") }.context("load GLib main context library")?;
+
+    // SAFETY: types follow the public webOS LS2 and GLib ABI.
+    unsafe {
+        let init: Symbol<'_, Init> = ls2.get(b"LSErrorInit\0")?;
+        let free: Symbol<'_, Free> = ls2.get(b"LSErrorFree\0")?;
+        let register: Symbol<'_, Register> = ls2.get(b"LSRegister\0")?;
+        let unregister: Symbol<'_, Unregister> = ls2.get(b"LSUnregister\0")?;
+        let attach: Symbol<'_, Attach> = ls2.get(b"LSGmainContextAttach\0")?;
+        let call: Symbol<'_, CallOneReply> = ls2.get(b"LSCallOneReply\0")?;
+        let cancel: Symbol<'_, Cancel> = ls2.get(b"LSCallCancel\0")?;
+        let get_payload: Symbol<'_, GetPayload> = ls2.get(b"LSMessageGetPayload\0")?;
+        let context_new: Symbol<'_, NewContext> = glib.get(b"g_main_context_new\0")?;
+        let iterate: Symbol<'_, Iteration> = glib.get(b"g_main_context_iteration\0")?;
+        let context_unref: Symbol<'_, Unref> = glib.get(b"g_main_context_unref\0")?;
+
+        let mut client: *mut libc::c_void = ptr::null_mut();
+        println!("C5_HANDLE_TEST_BEGIN client={NAME} max_handles=1 no_pixels=true");
+        checked(*init, *free, "LS2_REGISTER", |err| {
+            register(name.as_ptr(), &mut client, err)
+        })?;
+        if client.is_null() {
+            bail!("LS2_REGISTER_NULL_HANDLE");
+        }
+
+        let mut context: *mut libc::c_void = ptr::null_mut();
+        // Keep the one callback state alive through unregister, including on
+        // error and cancelled calls.
+        let mut reply = ReplyState {
+            payload_fn: *get_payload,
+            received: None,
+        };
+
+        let test_result = (|| -> Result<()> {
+            context = context_new();
+            if context.is_null() {
+                bail!("GLIB_CONTEXT_ALLOC_FAILED");
+            }
+            checked(*init, *free, "LS2_ATTACH", |err| {
+                attach(client, context, err)
+            })?;
+
+            // Bounded requests, no retries, no parallel capture handles, no
+            // file output. The same LS2 connection serves both calls.
+            let mut request = |method: &str, request_body: &serde_json::Value| -> Result<serde_json::Value> {
+                reply.received = None;
+                let uri = CString::new(format!("luna://com.webos.service.capture/{method}"))?;
+                let body = CString::new(request_body.to_string())?;
+                let mut token: u32 = 0;
+                checked(*init, *free, "LS2_CALL_FAILED", |err| {
+                    call(
+                        client,
+                        uri.as_ptr(),
+                        body.as_ptr(),
+                        on_reply,
+                        (&mut reply as *mut ReplyState).cast(),
+                        &mut token,
+                        err,
+                    )
+                })?;
+                let start = Instant::now();
+                while reply.received.is_none() && start.elapsed() < Duration::from_secs(2) {
+                    iterate(context, 0);
+                    if reply.received.is_none() {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                let Some(payload) = reply.received.take() else {
+                    // Pending callback remains in stable ReplyState until
+                    // unregister; cancel before returning on timeout.
+                    if token != 0 {
+                        checked(*init, *free, "LS2_CANCEL", |err| {
+                            cancel(client, token, err)
+                        })?;
+                    }
+                    bail!("LS2_{method}_TIMEOUT_2000MS");
+                };
+                let json: serde_json::Value = serde_json::from_str(&payload)
+                    .with_context(|| format!("LS2_{method}_INVALID_REPLY"))?;
+                if json.get("returnValue").and_then(serde_json::Value::as_bool) != Some(true) {
+                    bail!("LS2_{method}_REJECTED: {payload}");
+                }
+                Ok(json)
+            };
+
+            let created = request("createHandle", &serde_json::json!({}))?;
+            let handle = created
+                .get("handle")
+                .ok_or_else(|| anyhow::anyhow!("C5_CREATE_HANDLE_MISSING_HANDLE; do not continue"))?;
+            if !valid_capture_handle(handle) {
+                bail!("C5_CREATE_HANDLE_INVALID_HANDLE");
+            }
+            let handle = handle.clone();
+            println!("C5_HANDLE_CREATED kind={} no_frame_requested=true",
+                if handle.is_number() { "number" } else { "string" });
+
+            // Destroy before unregister: no properties, setOutput, execute.
+            let _ = request("destroyHandle", &serde_json::json!({"handle": handle}))?;
+            println!("C5_HANDLE_DESTROYED returned_true=true");
+            Ok(())
+        })();
+
+        let cleanup_result = checked(*init, *free, "LS2_UNREGISTER", |err| {
+            unregister(client, err)
+        });
+        if !context.is_null() {
+            context_unref(context);
+        }
+        cleanup_result.context("native Luna test must unregister cleanly")?;
+        test_result?;
+        println!("C5_HANDLE_LIFECYCLE_PASS created=1 destroyed=1 no_pixels=true");
+    }
+    Ok(())
+}
+
+fn valid_capture_handle(handle: &serde_json::Value) -> bool {
+    match handle {
+        serde_json::Value::Number(n) => n.as_u64().is_some(),
+        serde_json::Value::String(s) => !s.is_empty() && s.len() <= 128,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handle_validation_rejects_null_and_compound_handles() {
+        assert!(valid_capture_handle(&serde_json::json!(42)));
+        assert!(valid_capture_handle(&serde_json::json!("capture-id")));
+        assert!(!valid_capture_handle(&serde_json::json!(null)));
+        assert!(!valid_capture_handle(&serde_json::json!({})));
+        assert!(!valid_capture_handle(&serde_json::json!("")));
+        assert!(!valid_capture_handle(&serde_json::json!(-5)));
+        assert!(run_handle_lifecycle(false).is_err());
+    }
 
     #[test]
     fn explicit_ack_required_without_loading_any_native_library() {
