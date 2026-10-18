@@ -45,7 +45,7 @@ pub async fn run(acknowledge: bool) -> Result<()> {
         .await
         .context("C5_STAGE5_NATIVE_THREAD_JOIN_FAILED")??;
     let native_after = CpuSnapshot::sample()?;
-    print_cpu("native", &native_before, &native_after, clk)?;
+    print_cpu("native", &native_before, &native_after, i64::from(clk))?;
     println!("C5_STAGE5_NATIVE_PHASE_COMPLETE frames=5");
 
     // Native client has unregistered and destroyed its handle. Never run
@@ -53,7 +53,7 @@ pub async fn run(acknowledge: bool) -> Result<()> {
     let shots_before = CpuSnapshot::sample()?;
     execute_oneshot_five().await?;
     let shots_after = CpuSnapshot::sample()?;
-    print_cpu("oneshot", &shots_before, &shots_after, clk)?;
+    print_cpu("oneshot", &shots_before, &shots_after, i64::from(clk))?;
     println!(
         "C5_STAGE5_BENCH_PASS native_frames=5 oneshot_frames=5 \
          format=JPEG dimensions=320x180 one_shot_quality_75_requested=true \
