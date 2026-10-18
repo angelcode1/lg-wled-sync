@@ -5,6 +5,7 @@ mod hue;
 mod local_http;
 mod ls2_access;
 mod ls2_bench;
+mod ls2_stage7;
 mod ls2_probe;
 mod nanoleaf;
 mod output;
@@ -176,6 +177,12 @@ enum Commands {
         #[arg(long)]
         acknowledge_device_open: bool,
     },
+    /// Stage 7: one native plus one one-shot 320x180 JPEG, Clear media only.
+    TestLs2Stage7ClearPair {
+        /// Acknowledge exactly two temporary captures on a local clear scene.
+        #[arg(long)]
+        acknowledge_stage7_clear_pair: bool,
+    },
     /// Five native frames versus five one-shot JPEGs, known-Clear local video only.
     BenchLs2ClearSession {
         /// Explicit consent to bounded capture and per-process CPU measurements.
@@ -312,6 +319,9 @@ async fn main() -> Result<()> {
         Commands::TestV4l2CurrentFormat {
             acknowledge_device_open,
         } => run_test_v4l2_current_format(acknowledge_device_open),
+        Commands::TestLs2Stage7ClearPair {
+            acknowledge_stage7_clear_pair,
+        } => ls2_stage7::run(acknowledge_stage7_clear_pair).await,
         Commands::BenchLs2ClearSession {
             acknowledge_stage5_clear_benchmark,
         } => ls2_bench::run(acknowledge_stage5_clear_benchmark).await,
