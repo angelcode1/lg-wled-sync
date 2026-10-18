@@ -5,7 +5,9 @@
     "/var/luna-service2/roles.d/org.webosbrew.lg-hue-sync.c5-probe.role.json"
   ],
   "serviceFiles": [],
-  "clientPermissionFiles": [],
+  "clientPermissionFiles": [
+    "/var/luna-service2/client-permissions.d/org.webosbrew.lg-hue-sync.c5-probe.perm.json"
+  ],
   "apiPermissionFiles": [],
   "groupsFiles": []
 }
