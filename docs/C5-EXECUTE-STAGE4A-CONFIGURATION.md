@@ -1,6 +1,41 @@
 # C5 Stage 4A — configure a single native capture handle, without execute
 
-**Status: code proposed, not tested on the TV, not authorized to run.**
+**Status: completed successfully on the owner's LG C5 on 2026-10-18; original Stage 1 permissions and executable restored.**
+
+## Verified real-device Stage 4A result
+
+The owner ran the checksummed Stage 4A kit. Observed on the LG C5:
+
+```text
+STAGE1_HASHES_PASS
+C5_STAGE4A_POLICY_VERIFIED own_name_only=true outbound_capture_only=true ACG=capture.client
+C5_STAGE4A_TEMPORARY_ACG_GRANTED__CONFIG_ONLY_NO_EXECUTE
+C5_HANDLE_TEST_BEGIN client=org.webosbrew.lg-hue-sync.c5-probe max_handles=1 config=true no_pixels=true
+C5_HANDLE_CREATED kind=number no_frame_requested=true
+C5_HANDLE_CONFIGURED method=BLENDED format=JPEG width=320 height=180 no_execute=true
+C5_HANDLE_DESTROYED returned_true=true
+C5_HANDLE_CONFIGURATION_PASS created=1 configured=true destroyed=1 no_pixels=true
+C5_STAGE4A_CONFIGURATION_PASS__NO_EXECUTE
+C5_STAGE4A_RESTORING_STAGE1_AFTER_TEST
+C5_STAGE1_RESTORED_AND_RESCANNED
+STAGE1_HASHES_PASS
+```
+
+The separate final status check verified the original Stage 1 Rust binary
+and three custom policy files against their stored SHA-256 hashes; the
+Stage 4A temporary backup directory was absent. No vendor roles,
+LG-reserved names or wildcard ACG entries were introduced.
+
+**What this proves:** one client-owned numeric handle accepts the exact
+320×180 BLENDED/JPEG `setProperties`, quality-75 `setOptions`,
+private JPEG-path `setOutput`, and `destroyHandle` in the same native
+LS2 registration. Both normal cleanup and policy rollback passed.
+
+**Still unknown:** the effect of `execute`, JPEG output validity, whether
+a frame is produced at all, file-read or frame-copy overhead, whether
+`execute` can be called repeatedly on the configured handle, and
+the CPU load of both the Rust client and LG `captureservice`.
+A successful `setOutput` ACK does not establish actual capture.
 
 ## What Stage 3 established
 
@@ -73,8 +108,8 @@ then restore exact Stage 1 files and rescan whether the test passed
 or failed. Verify `STAGE1_HASHES_PASS` independently afterward.
 A hard interruption can require owner-initiated recovery.
 
-No TV stage 4A operations are authorized or executed merely by
-merging this source and document.
+Stage 4A was explicitly approved, executed and automatically rolled back.
+The installed baseline on the C5 is the original Stage 1 role and binary.
 
 ## After Stage 4A, Stage 4B needs another explicit approval
 
