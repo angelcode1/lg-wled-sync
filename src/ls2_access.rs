@@ -220,13 +220,13 @@ pub fn run(acknowledge: bool) -> Result<()> {
 /// This mutates an LG capture-service session, even though it does not
 /// set an output or execute a screenshot. Never called by the daemon.
 pub fn run_handle_lifecycle(acknowledge: bool) -> Result<()> {
-    run_handle_session(acknowledge, false, None, 0)
+    run_handle_session(acknowledge, false, None, 0, None)
 }
 
 /// Stage 4A: configure a private no-pixel output, then destroy the handle.
 /// NO execute call. Requires a separately approved temporary capture.client ACG.
 pub fn run_handle_configuration(acknowledge: bool) -> Result<()> {
-    run_handle_session(acknowledge, true, None, 0)
+    run_handle_session(acknowledge, true, None, 0, None)
 }
 
 /// Stage 4B is never automatic. One frame is allowed only when an independent
@@ -247,7 +247,7 @@ pub async fn run_one_clear_execute(acknowledge: bool) -> Result<()> {
     // runtime handle is used for one last fresh classification after output
     // setup and immediately before the only execute call.
     let runtime = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || run_handle_session(true, true, Some(runtime), 1))
+    tokio::task::spawn_blocking(move || run_handle_session(true, true, Some(runtime), 1, None))
         .await
         .context("C5_EXECUTE_BLOCKING_THREAD_FAILED")?
 }
@@ -286,7 +286,17 @@ impl Drop for ScopedOutputDir {
 /// executions. The caller separately performs independent Clear preflight,
 /// owns timing and CPU sampling, and restores the Stage 1 role afterward.
 pub(crate) fn run_five_native_clear_frames(runtime: tokio::runtime::Handle) -> Result<()> {
-    run_handle_session(true, true, Some(runtime), 5)
+    run_handle_session(true, true, Some(runtime), 5, None)
+}
+
+/// Stage 7 special-case: one known-Clear screenshot only, copied to the
+/// operator-owned short-lived private stage directory for memory-only
+/// transfer/decode on the Mac. No permanent capture path.
+pub(crate) fn run_stage7_native_clear_frame(
+    runtime: tokio::runtime::Handle,
+    out: PathBuf,
+) -> Result<()> {
+    run_handle_session(true, true, Some(runtime), 1, Some(out))
 }
 
 fn run_handle_session(
@@ -294,7 +304,11 @@ fn run_handle_session(
     configure: bool,
     execute_runtime: Option<tokio::runtime::Handle>,
     frame_limit: u8,
+    retained_frame: Option<PathBuf>,
 ) -> Result<()> {
+    if retained_frame.is_some() && (frame_limit != 1 || execute_runtime.is_none()) {
+        bail!("C5_STAGE7_REFUSE_INVALID_RETENTION_SCOPE");
+    }
     if frame_limit > 5 || (execute_runtime.is_none() && frame_limit != 0) {
         bail!("C5_FRAME_LIMIT_INVALID");
     }
@@ -492,6 +506,24 @@ fn run_handle_session(
                             } else {
                                 println!(
                                     "C5_STAGE5_NATIVE_FRAME index={number} width=320 height=180 bytes={file_bytes} request_ms={elapsed_ms}"
+                                );
+                            }
+                            if let Some(destination) = retained_frame.as_ref() {
+                                // Create exclusively (no symlinks/overwrites). The Mac
+                                // installer owns and deletes the private stage directory.
+                                let mut source = std::fs::File::open(&path)?;
+                                let mut target = std::fs::OpenOptions::new()
+                                    .write(true)
+                                    .create_new(true)
+                                    .open(destination)
+                                    .context("C5_STAGE7_REFUSE_EXISTING_OUTPUT")?;
+                                let copied = std::io::copy(&mut source, &mut target)?;
+                                if copied != file_bytes as u64 {
+                                    bail!("C5_STAGE7_REFUSE_COPY_SIZE");
+                                }
+                                verify_private_jpeg(destination)?;
+                                println!(
+                                    "C5_STAGE7_NATIVE_FRAME width=320 height=180 bytes={file_bytes} request_ms={elapsed_ms} staged_private=true"
                                 );
                             }
                             std::fs::remove_file(&path).context("C5_FRAME_CLEANUP_FAILED")?;
