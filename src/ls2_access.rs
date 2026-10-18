@@ -220,13 +220,13 @@ pub fn run(acknowledge: bool) -> Result<()> {
 /// This mutates an LG capture-service session, even though it does not
 /// set an output or execute a screenshot. Never called by the daemon.
 pub fn run_handle_lifecycle(acknowledge: bool) -> Result<()> {
-    run_handle_session(acknowledge, false, None)
+    run_handle_session(acknowledge, false, None, 0)
 }
 
 /// Stage 4A: configure a private no-pixel output, then destroy the handle.
 /// NO execute call. Requires a separately approved temporary capture.client ACG.
 pub fn run_handle_configuration(acknowledge: bool) -> Result<()> {
-    run_handle_session(acknowledge, true, None)
+    run_handle_session(acknowledge, true, None, 0)
 }
 
 /// Stage 4B is never automatic. One frame is allowed only when an independent
@@ -247,7 +247,7 @@ pub async fn run_one_clear_execute(acknowledge: bool) -> Result<()> {
     // runtime handle is used for one last fresh classification after output
     // setup and immediately before the only execute call.
     let runtime = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || run_handle_session(true, true, Some(runtime)))
+    tokio::task::spawn_blocking(move || run_handle_session(true, true, Some(runtime), 1))
         .await
         .context("C5_EXECUTE_BLOCKING_THREAD_FAILED")?
 }
@@ -272,6 +272,9 @@ impl ScopedOutputDir {
     fn jpeg_path(&self) -> PathBuf {
         self.path.join("single.jpg")
     }
+    fn numbered_jpeg_path(&self, number: u8) -> PathBuf {
+        self.path.join(format!("frame-{number:02}.jpg"))
+    }
 }
 impl Drop for ScopedOutputDir {
     fn drop(&mut self) {
@@ -279,11 +282,22 @@ impl Drop for ScopedOutputDir {
     }
 }
 
+/// Stage 5 uses exactly one native registration and capture handle for five
+/// executions. The caller separately performs independent Clear preflight,
+/// owns timing and CPU sampling, and restores the Stage 1 role afterward.
+pub(crate) fn run_five_native_clear_frames(runtime: tokio::runtime::Handle) -> Result<()> {
+    run_handle_session(true, true, Some(runtime), 5)
+}
+
 fn run_handle_session(
     acknowledge: bool,
     configure: bool,
     execute_runtime: Option<tokio::runtime::Handle>,
+    frame_limit: u8,
 ) -> Result<()> {
+    if frame_limit > 5 || (execute_runtime.is_none() && frame_limit != 0) {
+        bail!("C5_FRAME_LIMIT_INVALID");
+    }
     if !acknowledge {
         if configure {
             bail!(
@@ -441,21 +455,47 @@ fn run_handle_session(
                         execute_runtime.is_some()
                     );
                     if let Some(runtime) = execute_runtime.as_ref() {
-                        // Query from the blocking thread, using the same
-                        // independent media classifier as test-blended.
-                        let last_class = runtime.block_on(crate::capture::media::query());
-                        if last_class != crate::capture::drm_routing::PlaybackClass::Clear {
-                            bail!("C5_EXECUTE_REFUSE_MEDIA_CHANGED: no execute called");
+                        // Re-classify before EVERY frame, including the
+                        // very first one. Do not proceed after unknown/HDMI/
+                        // Protected status or a failed media query.
+                        for number in 1..=frame_limit {
+                            let path = if frame_limit == 1 {
+                                output.jpeg_path()
+                            } else {
+                                output.numbered_jpeg_path(number)
+                            };
+                            if frame_limit > 1 {
+                                // One unique output path per frame: no stale
+                                // file, no overwrite of old frame data.
+                                request(
+                                    "setOutput",
+                                    &serde_json::json!({
+                                        "handle": handle,
+                                        "file": {"path": path}
+                                    }),
+                                )?;
+                            }
+                            let last_class = runtime.block_on(crate::capture::media::query());
+                            if last_class != crate::capture::drm_routing::PlaybackClass::Clear {
+                                bail!("C5_EXECUTE_REFUSE_MEDIA_CHANGED: stopped before execute {number}");
+                            }
+                            let began = Instant::now();
+                            request("execute", &serde_json::json!({"handle": handle}))?;
+                            let elapsed_ms = began.elapsed().as_millis();
+                            // Never print, transmit, decode or retain JPEG bytes.
+                            // Validate bounded file/markers/geometry, then delete.
+                            let file_bytes = verify_private_jpeg(&path)?;
+                            if frame_limit == 1 {
+                                println!(
+                                    "C5_SINGLE_EXECUTE_VALID_JPEG width=320 height=180 bytes={file_bytes} execute_ms={elapsed_ms} frames=1"
+                                );
+                            } else {
+                                println!(
+                                    "C5_STAGE5_NATIVE_FRAME index={number} width=320 height=180 bytes={file_bytes} request_ms={elapsed_ms}"
+                                );
+                            }
+                            std::fs::remove_file(&path).context("C5_FRAME_CLEANUP_FAILED")?;
                         }
-                        let began = Instant::now();
-                        request("execute", &serde_json::json!({"handle": handle}))?;
-                        let elapsed_ms = began.elapsed().as_millis();
-                        // Do not retain or print frame bytes. Only validated
-                        // JPEG metadata from a private ephemeral file.
-                        let file_bytes = verify_private_jpeg(&output.jpeg_path())?;
-                        println!(
-                            "C5_SINGLE_EXECUTE_VALID_JPEG width=320 height=180 bytes={file_bytes} execute_ms={elapsed_ms} frames=1"
-                        );
                     }
                 }
                 Ok(())
@@ -478,9 +518,13 @@ fn run_handle_session(
         cleanup_result.context("native Luna test must unregister cleanly")?;
         test_result?;
         if execute_runtime.is_some() {
-            println!(
-                "C5_SINGLE_EXECUTE_PASS created=1 executed=1 destroyed=1 frame_retained=false"
-            );
+            if frame_limit == 5 {
+                println!("C5_STAGE5_NATIVE_PASS frames=5 handles=1 destroyed=1 frame_retained=false");
+            } else {
+                println!(
+                    "C5_SINGLE_EXECUTE_PASS created=1 executed=1 destroyed=1 frame_retained=false"
+                );
+            }
         } else if configure {
             println!(
                 "C5_HANDLE_CONFIGURATION_PASS created=1 configured=true destroyed=1 no_pixels=true"
@@ -494,7 +538,7 @@ fn run_handle_session(
 
 /// Examine only the bounded JPEG signature and SOF dimensions. No decode,
 /// no image logging and no file retention (ScopedOutputDir Drop removes it).
-fn verify_private_jpeg(path: &std::path::Path) -> Result<usize> {
+pub(crate) fn verify_private_jpeg(path: &std::path::Path) -> Result<usize> {
     const MAX_JPEG: u64 = 2 * 1024 * 1024;
     let metadata = std::fs::symlink_metadata(path).context("C5_EXECUTE_JPEG_MISSING")?;
     if !metadata.file_type().is_file() || metadata.len() < 16 || metadata.len() > MAX_JPEG {
