@@ -335,7 +335,7 @@ fn run_handle_session(
 
         let mut client: *mut libc::c_void = ptr::null_mut();
         println!(
-            "C5_HANDLE_TEST_BEGIN client={NAME} max_handles=1 config={configure} execute={} max_frames=1",
+            "C5_HANDLE_TEST_BEGIN client={NAME} max_handles=1 config={configure} execute={} max_frames={frame_limit}",
             execute_runtime.is_some()
         );
         checked(*init, *free, "LS2_REGISTER", |err| {
