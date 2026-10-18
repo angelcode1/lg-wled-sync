@@ -519,7 +519,9 @@ fn run_handle_session(
         test_result?;
         if execute_runtime.is_some() {
             if frame_limit == 5 {
-                println!("C5_STAGE5_NATIVE_PASS frames=5 handles=1 destroyed=1 frame_retained=false");
+                println!(
+                    "C5_STAGE5_NATIVE_PASS frames=5 handles=1 destroyed=1 frame_retained=false"
+                );
             } else {
                 println!(
                     "C5_SINGLE_EXECUTE_PASS created=1 executed=1 destroyed=1 frame_retained=false"
