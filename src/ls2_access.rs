@@ -4,6 +4,7 @@
 use anyhow::{bail, Context, Result};
 use libloading::{Library, Symbol};
 use std::ffi::{CStr, CString};
+use std::io::Read;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 use std::ptr;
@@ -219,13 +220,37 @@ pub fn run(acknowledge: bool) -> Result<()> {
 /// This mutates an LG capture-service session, even though it does not
 /// set an output or execute a screenshot. Never called by the daemon.
 pub fn run_handle_lifecycle(acknowledge: bool) -> Result<()> {
-    run_handle_session(acknowledge, false)
+    run_handle_session(acknowledge, false, None)
 }
 
 /// Stage 4A: configure a private no-pixel output, then destroy the handle.
 /// NO execute call. Requires a separately approved temporary capture.client ACG.
 pub fn run_handle_configuration(acknowledge: bool) -> Result<()> {
-    run_handle_session(acknowledge, true)
+    run_handle_session(acknowledge, true, None)
+}
+
+/// Stage 4B is never automatic. One frame is allowed only when an independent
+/// foreground-media classifier reports Clear repeatedly and immediately
+/// before the native execute call. No protected/unknown fallback.
+pub async fn run_one_clear_execute(acknowledge: bool) -> Result<()> {
+    if !acknowledge {
+        bail!("pass --acknowledge-single-clear-execute for one native LG screenshot");
+    }
+    for _ in 0..3 {
+        if crate::capture::media::query().await
+            != crate::capture::drm_routing::PlaybackClass::Clear
+        {
+            bail!("C5_EXECUTE_REFUSE_MEDIA_NOT_CLEAR: no capture requested");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    // A blocking LS2 GLib event loop must not occupy a Tokio worker. The
+    // runtime handle is used for one last fresh classification after output
+    // setup and immediately before the only execute call.
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || run_handle_session(true, true, Some(runtime)))
+        .await
+        .context("C5_EXECUTE_BLOCKING_THREAD_FAILED")?
 }
 
 struct ScopedOutputDir {
@@ -255,7 +280,11 @@ impl Drop for ScopedOutputDir {
     }
 }
 
-fn run_handle_session(acknowledge: bool, configure: bool) -> Result<()> {
+fn run_handle_session(
+    acknowledge: bool,
+    configure: bool,
+    execute_runtime: Option<tokio::runtime::Handle>,
+) -> Result<()> {
     if !acknowledge {
         if configure {
             bail!(
@@ -293,7 +322,8 @@ fn run_handle_session(acknowledge: bool, configure: bool) -> Result<()> {
 
         let mut client: *mut libc::c_void = ptr::null_mut();
         println!(
-            "C5_HANDLE_TEST_BEGIN client={NAME} max_handles=1 config={configure} no_pixels=true"
+            "C5_HANDLE_TEST_BEGIN client={NAME} max_handles=1 config={configure} execute={} max_frames=1",
+            execute_runtime.is_some()
         );
         checked(*init, *free, "LS2_REGISTER", |err| {
             register(name.as_ptr(), &mut client, err)
@@ -407,7 +437,27 @@ fn run_handle_session(acknowledge: bool, configure: bool) -> Result<()> {
                             "file": {"path": output.jpeg_path()}
                         }),
                     )?;
-                    println!("C5_HANDLE_CONFIGURED method=BLENDED format=JPEG width=320 height=180 no_execute=true");
+                    println!(
+                        "C5_HANDLE_CONFIGURED method=BLENDED format=JPEG width=320 height=180 execute={}",
+                        execute_runtime.is_some()
+                    );
+                    if let Some(runtime) = execute_runtime.as_ref() {
+                        // Query from the blocking thread, using the same
+                        // independent media classifier as test-blended.
+                        let last_class = runtime.block_on(crate::capture::media::query());
+                        if last_class != crate::capture::drm_routing::PlaybackClass::Clear {
+                            bail!("C5_EXECUTE_REFUSE_MEDIA_CHANGED: no execute called");
+                        }
+                        let began = Instant::now();
+                        request("execute", &serde_json::json!({"handle": handle}))?;
+                        let elapsed_ms = began.elapsed().as_millis();
+                        // Do not retain or print frame bytes. Only validated
+                        // JPEG metadata from a private ephemeral file.
+                        let file_bytes = verify_private_jpeg(&output.jpeg_path())?;
+                        println!(
+                            "C5_SINGLE_EXECUTE_VALID_JPEG width=320 height=180 bytes={file_bytes} execute_ms={elapsed_ms} frames=1"
+                        );
+                    }
                 }
                 Ok(())
             })();
@@ -428,7 +478,9 @@ fn run_handle_session(acknowledge: bool, configure: bool) -> Result<()> {
         }
         cleanup_result.context("native Luna test must unregister cleanly")?;
         test_result?;
-        if configure {
+        if execute_runtime.is_some() {
+            println!("C5_SINGLE_EXECUTE_PASS created=1 executed=1 destroyed=1 frame_retained=false");
+        } else if configure {
             println!(
                 "C5_HANDLE_CONFIGURATION_PASS created=1 configured=true destroyed=1 no_pixels=true"
             );
@@ -437,6 +489,74 @@ fn run_handle_session(acknowledge: bool, configure: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Examine only the bounded JPEG signature and SOF dimensions. No decode,
+/// no image logging and no file retention (ScopedOutputDir Drop removes it).
+fn verify_private_jpeg(path: &std::path::Path) -> Result<usize> {
+    const MAX_JPEG: u64 = 2 * 1024 * 1024;
+    let metadata = std::fs::symlink_metadata(path).context("C5_EXECUTE_JPEG_MISSING")?;
+    if !metadata.file_type().is_file() || metadata.len() < 16 || metadata.len() > MAX_JPEG {
+        bail!("C5_EXECUTE_JPEG_NOT_REGULAR_OR_SIZE_OUT_OF_RANGE");
+    }
+    let file = std::fs::File::open(path).context("C5_EXECUTE_JPEG_OPEN_FAILED")?;
+    let mut jpeg = Vec::new();
+    file.take(MAX_JPEG + 1).read_to_end(&mut jpeg)?;
+    if jpeg.len() as u64 != metadata.len() {
+        bail!("C5_EXECUTE_JPEG_SIZE_CHANGED");
+    }
+    verify_jpeg_dimensions(&jpeg, 320, 180)?;
+    Ok(jpeg.len())
+}
+
+fn verify_jpeg_dimensions(jpeg: &[u8], expected_width: u16, expected_height: u16) -> Result<()> {
+    if !jpeg.starts_with(&[0xff, 0xd8])
+        || !jpeg.ends_with(&[0xff, 0xd9])
+        || jpeg.len() < 16
+    {
+        bail!("C5_EXECUTE_JPEG_INVALID_MARKERS");
+    }
+    let mut cursor = 2usize;
+    while cursor + 4 <= jpeg.len() {
+        if jpeg[cursor] != 0xff {
+            bail!("C5_EXECUTE_JPEG_INVALID_SEGMENT");
+        }
+        while cursor < jpeg.len() && jpeg[cursor] == 0xff {
+            cursor += 1;
+        }
+        if cursor >= jpeg.len() {
+            bail!("C5_EXECUTE_JPEG_TRUNCATED");
+        }
+        let marker = jpeg[cursor];
+        cursor += 1;
+        if matches!(marker, 0xd9 | 0xda) {
+            break;
+        }
+        if marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        if cursor + 2 > jpeg.len() {
+            break;
+        }
+        let length = usize::from(u16::from_be_bytes([jpeg[cursor], jpeg[cursor + 1]]));
+        if length < 2 || cursor.checked_add(length).is_none_or(|end| end > jpeg.len()) {
+            bail!("C5_EXECUTE_JPEG_BAD_SEGMENT_LENGTH");
+        }
+        // Baseline/progressive/lossless SOF, excluding Huffman/DAC markers.
+        if (0xc0..=0xcf).contains(&marker) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
+            if length < 7 {
+                bail!("C5_EXECUTE_JPEG_BAD_SOF");
+            }
+            let height = u16::from_be_bytes([jpeg[cursor + 3], jpeg[cursor + 4]]);
+            let width = u16::from_be_bytes([jpeg[cursor + 5], jpeg[cursor + 6]]);
+            if width != expected_width || height != expected_height {
+                bail!("C5_EXECUTE_JPEG_UNEXPECTED_DIMENSIONS");
+            }
+            return Ok(());
+        }
+        cursor += length;
+    }
+    bail!("C5_EXECUTE_JPEG_SOF_NOT_FOUND")
 }
 
 fn valid_capture_handle(handle: &serde_json::Value) -> bool {
@@ -450,6 +570,22 @@ fn valid_capture_handle(handle: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jpeg_metadata_gate_accepts_synthetic_dimensions_only() {
+        // Metadata-only fixture is not a real decodable image; this test
+        // validates the bounded marker and expected geometry parser.
+        let fake = [
+            0xff, 0xd8, // SOI
+            0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, // APP0
+            0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0xb4, 0x01, 0x40,
+            0x01, 0x01, 0x11, 0x00, // SOF0 width 320 height 180
+            0xff, 0xd9, // EOI
+        ];
+        assert!(verify_jpeg_dimensions(&fake, 320, 180).is_ok());
+        assert!(verify_jpeg_dimensions(&fake, 640, 360).is_err());
+        assert!(verify_jpeg_dimensions(&fake[..fake.len() - 2], 320, 180).is_err());
+    }
 
     #[test]
     fn handle_validation_rejects_null_and_compound_handles() {
