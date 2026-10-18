@@ -3,6 +3,7 @@ mod color;
 mod config;
 mod hue;
 mod local_http;
+mod ls2_access;
 mod ls2_probe;
 mod nanoleaf;
 mod output;
@@ -174,6 +175,13 @@ enum Commands {
         #[arg(long)]
         acknowledge_device_open: bool,
     },
+    /// Query LG's read-only capture capability using our own native LS2 identity.
+    /// Requires separately approved, narrowly scoped capture.client permission.
+    TestLs2CapturePermission {
+        /// Acknowledge one bounded native Luna method call. Never captures pixels.
+        #[arg(long)]
+        acknowledge_capture_permission_check: bool,
+    },
     /// Register/unregister a temporary Luna client without requesting capture
     TestLs2Registration {
         /// Acknowledge an active Luna bus registration and clean unregister
@@ -279,6 +287,9 @@ async fn main() -> Result<()> {
         Commands::TestV4l2CurrentFormat {
             acknowledge_device_open,
         } => run_test_v4l2_current_format(acknowledge_device_open),
+        Commands::TestLs2CapturePermission {
+            acknowledge_capture_permission_check,
+        } => ls2_access::run(acknowledge_capture_permission_check),
         Commands::TestLs2Registration {
             acknowledge_luna_registration,
             named_probe,
