@@ -86,6 +86,22 @@ enum Commands {
         #[arg(long, default_value_t = 180)]
         height: u32,
     },
+    /// No-light, bounded LG BLENDED capture + colour pipeline CPU benchmark.
+    BenchBlended {
+        /// Confirm that the currently playing material is yours and unprotected.
+        #[arg(long)]
+        acknowledge_clear_capture: bool,
+        /// 1..=30 screenshots. Defaults to ten.
+        #[arg(long, default_value_t = 10)]
+        samples: u8,
+        /// Extra idle time after each request, 0..=2000ms.
+        #[arg(long, default_value_t = 0)]
+        interval_ms: u64,
+        #[arg(long, default_value_t = 320)]
+        width: u32,
+        #[arg(long, default_value_t = 180)]
+        height: u32,
+    },
     /// Explicit, bounded native LG histogram probe; no config or light output
     TestHistogram {
         /// Confirm that this test temporarily initializes the LG VT histogram device
@@ -212,6 +228,13 @@ async fn main() -> Result<()> {
             width,
             height,
         } => run_test_blended(acknowledge_clear_capture, width, height).await,
+        Commands::BenchBlended {
+            acknowledge_clear_capture,
+            samples,
+            interval_ms,
+            width,
+            height,
+        } => run_bench_blended(acknowledge_clear_capture, samples, interval_ms, width, height).await,
         Commands::TestHistogram {
             acknowledge_native_capture,
             samples,
@@ -884,7 +907,13 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     } else {
         config.fps as f64
     };
-    let mut target_fps = initial_fps.clamp(20.0, 60.0);
+    // A 170-220ms screenshot cannot supply 30-60 new images per second.
+    // Fewer wakeups are better on webOS; callbacks still service UI/power.
+    let mut target_fps = if config.blended_capture_enabled {
+        initial_fps.clamp(1.0, 8.0)
+    } else {
+        initial_fps.clamp(20.0, 60.0)
+    };
     let mut frame_interval = Duration::from_secs_f64(1.0 / target_fps);
 
     info!(
@@ -1644,7 +1673,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
 
         // In auto FPS mode, dynamically update cadence if TV source rate changed (e.g. film started)
-        if config.fps == 0 {
+        if config.fps == 0 && !config.blended_capture_enabled {
             if let Some(new_fps) = detect_source_fps() {
                 let clamped = new_fps.clamp(20.0, 60.0);
                 if (clamped - target_fps).abs() > 0.5 {
@@ -2179,6 +2208,106 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     }
 
     info!("lg-hue-sync terminated cleanly.");
+    Ok(())
+}
+
+/// Entirely independent from lighting configuration and network transmitters.
+/// CPU percent counts the Rust process only, not LG's capture service process.
+async fn run_bench_blended(
+    acknowledge_clear_capture: bool,
+    samples: u8,
+    interval_ms: u64,
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    if !acknowledge_clear_capture {
+        return Err(anyhow!("bench-blended requires --acknowledge-clear-capture"));
+    }
+    if !(1..=30).contains(&samples) || interval_ms > 2000 {
+        return Err(anyhow!("samples must be 1..=30, interval-ms 0..=2000"));
+    }
+    if width == 0 || height == 0 || width > 640 || height > 360 {
+        return Err(anyhow!("BLENDED benchmark dimensions must fit within 640x360"));
+    }
+    // A Clear result must be sustained, not a single transient sample.
+    for _ in 0..3 {
+        if capture::media::query().await != PlaybackClass::Clear {
+            return Err(anyhow!("source not independently classified Clear; no captures started"));
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    fn cpu_us() -> Option<u128> {
+        let mut ru = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        if unsafe { libc::getrusage(libc::RUSAGE_SELF, ru.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        let ru = unsafe { ru.assume_init() };
+        let micros = |v: libc::timeval| -> Option<u128> {
+            let sec = u128::try_from(v.tv_sec).ok()?;
+            let usec = u128::try_from(v.tv_usec).ok()?;
+            Some(sec * 1_000_000 + usec)
+        };
+        Some(micros(ru.ru_utime)? + micros(ru.ru_stime)?)
+    }
+
+    let mut pipeline = ColorPipeline::new(1.0, 0.02, true);
+    let cpu_start = cpu_us();
+    let wall_start = std::time::Instant::now();
+    let mut media_fresh = std::time::Instant::now();
+    let mut request_total = 0u128;
+    let mut decode_total = 0u128;
+    let mut completed = 0u128;
+
+    for index in 1..=samples {
+        if media_fresh.elapsed() >= Duration::from_secs(1) {
+            if capture::media::query().await != PlaybackClass::Clear {
+                return Err(anyhow!("media lost Clear status; benchmark stopped"));
+            }
+            media_fresh = std::time::Instant::now();
+        }
+        let began = std::time::Instant::now();
+        let frame = capture::blended::capture_once(width, height).await?;
+        let field = pipeline.frame(&frame.pixels, frame.width, frame.height, false)?;
+        // Non-sensitive four-point summary: no screenshots, files, or LEDs.
+        let edge = [
+            field.at(0.5, 0.02),
+            field.at(0.98, 0.5),
+            field.at(0.5, 0.98),
+            field.at(0.02, 0.5),
+        ];
+        let edge_mean = edge.iter().map(|c| f64::from(c.luminance())).sum::<f64>() / 4.0;
+        request_total += frame.request_ms;
+        decode_total += frame.decode_ms;
+        completed += 1;
+        info!(
+            "BLENDED_BENCH_FRAME={} total_ms={} request_ms={} decode_ms={} png_bytes={} edge_luma={:.3}",
+            index,
+            began.elapsed().as_millis(),
+            frame.request_ms,
+            frame.decode_ms,
+            frame.png_bytes,
+            edge_mean
+        );
+        if interval_ms != 0 {
+            tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+        }
+    }
+
+    let wall_ms = wall_start.elapsed().as_millis();
+    let cpu_delta = cpu_start.zip(cpu_us()).map(|(a, b)| b.saturating_sub(a));
+    let rust_cpu_pct = cpu_delta.map(|value| {
+        value as f64 * 100.0 / (wall_ms.max(1) as f64 * 1000.0)
+    });
+    info!(
+        "BLENDED_BENCH_DONE frames={} elapsed_ms={} measured_fps={:.2} mean_request_ms={:.1} mean_decode_ms={:.1} rust_process_cpu_pct={:?} (LG captureservice CPU excluded)",
+        completed,
+        wall_ms,
+        completed as f64 * 1000.0 / wall_ms.max(1) as f64,
+        request_total as f64 / completed as f64,
+        decode_total as f64 / completed as f64,
+        rust_cpu_pct
+    );
     Ok(())
 }
 
