@@ -81,6 +81,10 @@ jobs:
         run: |
           python3 -m py_compile scripts/c5_stage7_edge_fidelity.py
           "$RUNNER_TEMP/c5-jpeg-audit-venv/bin/python" scripts/c5_stage7_edge_fidelity.py --selftest
+      - name: Stage 8 independent-reference colour fidelity gate (offline only)
+        run: |
+          python3 -m py_compile scripts/c5_stage8_reference_gate.py
+          "$RUNNER_TEMP/c5-jpeg-audit-venv/bin/python" scripts/c5_stage8_reference_gate.py --selftest
       - name: Test LG native C++ exception boundary
         run: |
           c++ -std=c++11 -Wall -Wextra -Werror -O2 \
