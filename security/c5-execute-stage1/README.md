@@ -18,7 +18,7 @@ anonymous Rust client with no role is expected under LS2 security but can
 have additional causes. We should test an independent **owned application
 name** before considering even a read-only service RPC.
 
-The two files here are an **uninstalled** least-privilege candidate for
+The three JSON files here are an **uninstalled** least-privilege candidate for
 that first registration-only test, and must not be confused with LG's roles.
 The TV's webOS 10 implementation still needs validation.
 
@@ -27,6 +27,7 @@ The TV's webOS 10 implementation still needs validation.
 - Own name: `org.webosbrew.lg-hue-sync.c5-probe`.
 - Role type `regular`, trustLevel `dev`.
 - Exact allowed name only, `inbound: []`, `outbound: []`.
+- The independent client-permission file maps only this own name to an **empty ACG array** `[]`.
 - **No `capture.client`, `capturepermission.security`, `all`,
   `com.webos.service.capture.client*`, VT permissions, or wildcard calls**.
 - No registered service file, installed daemon, startup hook, or WLED config.
@@ -50,7 +51,7 @@ as `-1027` on the C5.
 1. Confirm the rebuilt ARMv7 artifact CI passed, and stage a copy of that
    binary at the exact path above. Do not modify the current known-working
    test binary or install a background service.
-2. Inspect both staged JSON files on a Mac. Confirm exact exeName, role
+2. Inspect all three staged JSON files on a Mac. Confirm exact exeName, role
    name, `inbound: []`, `outbound: []`, and no wildcard permission.
 3. Read-only check that neither candidate exists already under
    `/var/luna-service2` or `/var/luna-service2-dev`.
