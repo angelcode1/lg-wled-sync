@@ -151,6 +151,39 @@ registration only, requires separate explicit owner approval to install
 TV policy files, and has a documented rollback. Do not use
 `com.webos.service.capture.client*` as the Rust probe identity.
 
+## 2026-10-18 follow-up: private group and custom policy locations
+
+The user checked the **C5 device itself**, read-only:
+
+- `capture.client` and `capturepermission.security` both have
+  `"public": false` and descriptions, but **no explicit trust-level
+  entry** in the printed `groups.d` file. That is evidence that both
+  ACGs are non-public, **not** evidence that the `dev`, `part` or
+  `oem` trust level can access them. Never assume
+  `public:false` means `dev` clients are authorized.
+- Existing `/var/luna-service2/{roles.d,client-permissions.d,manifests.d}`
+  **and** corresponding `/var/luna-service2-dev` subdirectories are
+  present; a role file may be installed under the former only after a
+  separate owner-approved staging decision.
+- The proposed unique stage-1 basename
+  `org.webosbrew.lg-hue-sync.c5-probe` showed **no collisions** in those
+  three policy-directory categories.
+- `/usr/sbin/ls-control` is installed. Its `scan-services` method is
+  documented on webOS OSE for rescanning roles/services after installation;
+  this does not prove LG webOS 10 behaves identically.
+  Rescanning is a policy mutation and **not** part of read-only preflight.
+
+**Status:** no TV LS2 policy has been installed. The stage-1
+registration-only role allows just the app's own name, has no outbound
+service list and no ACG grants. It cannot validate the private
+`execute` method yet. Before even stage 1 can run, the newly built
+ARMv7 binary must pass CI, the staged target path must be verified
+unaltered and the user must approve installation/rescan and its rollback.
+Do not attempt reserved LG name registration as a shortcut.
+
+WebOS OSE schema reference:
+https://www.webosose.org/docs/guides/development/configuration-files/security-guide/
+
 ## Evidence from other webOS implementations (not C5 observations)
 
 [webos-iptv-player capture client](https://github.com/lennylxx/webos-iptv-player/blob/7d8fd30e927ee9d09ba7979b053f9a25ac932420/scripts/tv-capt-remote.js) contains a concrete reusable capture-handle lifecycle:
