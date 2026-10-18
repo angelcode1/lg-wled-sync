@@ -175,7 +175,8 @@ fn get_capture_service() -> Result<ServiceCpu> {
     let mut found = None;
     for entry in fs::read_dir("/proc").context("cannot read /proc")? {
         let entry = entry?;
-        let Some(pid) = entry.file_name().to_str().and_then(|v| v.parse::<u32>().ok())
+        let filename = entry.file_name();
+        let Some(pid) = filename.to_str().and_then(|v| v.parse::<u32>().ok())
         else {
             continue;
         };
