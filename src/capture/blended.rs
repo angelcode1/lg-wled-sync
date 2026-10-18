@@ -24,6 +24,9 @@ pub struct BlendedFrame {
     pub width: u32,
     pub height: u32,
     pub finished: Instant,
+    pub request_ms: u128,
+    pub decode_ms: u128,
+    pub png_bytes: usize,
 }
 
 /// File is scoped to an unpredictable private directory. The directory and
@@ -64,6 +67,7 @@ pub async fn capture_once(width: u32, height: u32) -> Result<BlendedFrame> {
     if width == 0 || height == 0 || width > MAX_WIDTH || height > MAX_HEIGHT {
         bail!("BLENDED capture dimensions must be 1..=640 by 1..=360");
     }
+    let start = Instant::now();
     let temp = TempImage::new()?;
     let path = temp.image_path();
     let request = json!({
@@ -76,6 +80,7 @@ pub async fn capture_once(width: u32, height: u32) -> Result<BlendedFrame> {
     let reply = luna_client::request(URI, &request.to_string(), Duration::from_millis(1300), 8192)
         .await
         .ok_or_else(|| anyhow!("BLENDED Luna request failed or timed out"))?;
+    let replied = Instant::now();
     if reply["returnValue"].as_bool() != Some(true) {
         bail!("LG capture service rejected BLENDED request");
     }
@@ -99,11 +104,15 @@ pub async fn capture_once(width: u32, height: u32) -> Result<BlendedFrame> {
         bail!("BLENDED image changed during read");
     }
     let pixels = decode_png_rgb_or_rgba(&png, width, height)?;
+    let finished = Instant::now();
     Ok(BlendedFrame {
         pixels,
         width,
         height,
-        finished: Instant::now(),
+        finished,
+        request_ms: replied.duration_since(start).as_millis(),
+        decode_ms: finished.duration_since(replied).as_millis(),
+        png_bytes: png.len(),
     })
 }
 
