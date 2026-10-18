@@ -1,6 +1,6 @@
-# C5 Stage 5 — controlled native execute vs executeOneShot benchmark (proposal)
+# C5 Stage 5 — native execute vs executeOneShot: completed benchmark
 
-**Status: design only; not authorized, not deployed or run.**
+**Status: owner approved; executed on the real LG C5 on 2026-10-18; 5/5 native and 5/5 one-shot frames passed; full Stage 1 restoration and hash verification confirmed.**
 Stage 4B established on 2026-10-18 that the app-owned Rust native
 LS2 client can create/configure a reusable C5 capture handle,
 request **one** 320×180 BLENDED/JPEG frame using
@@ -9,6 +9,108 @@ reply/file check passed for 1,587 bytes, SOI/EOI JPEG markers, 320×180
 SOF dimensions, and one measured `execute` call latency of **161 ms**.
 The temporary `capture.client` grant was removed, original Stage 1
 files rescanned and SHA-256 checked (`STAGE1_HASHES_PASS`).
+
+## Observed Stage 5 result (real-device operator logs, 2026-10-18)
+
+The owner ran the approved Stage 5 Mac kit on the C5 with a source that
+passed the `Clear` preflight and fresh per-frame classification.
+Observed status and diagnostic markers:
+
+```text
+STAGE1_HASHES_PASS
+C5_STAGE5_POLICY_VERIFIED own_name_only=true outbound_capture_only=true ACG=capture.client
+C5_STAGE5_TEMPORARY_ACG_GRANTED__BOUNDED_5_PLUS_5_CLEAR_FRAMES
+C5_STAGE5_PREFLIGHT stable_clear_checks=3 protected_unknown_refuse=true
+C5_STAGE5_CPU_SOURCE pid=4788 start_ticks=1849 clock_hz=100
+C5_HANDLE_CREATED kind=number no_frame_requested=true
+C5_STAGE5_NATIVE_FRAME index=1 width=320 height=180 bytes=4600 request_ms=151
+C5_STAGE5_NATIVE_FRAME index=2 width=320 height=180 bytes=4596 request_ms=154
+C5_STAGE5_NATIVE_FRAME index=3 width=320 height=180 bytes=4645 request_ms=151
+C5_STAGE5_NATIVE_FRAME index=4 width=320 height=180 bytes=4698 request_ms=151
+C5_STAGE5_NATIVE_FRAME index=5 width=320 height=180 bytes=4669 request_ms=151
+C5_HANDLE_DESTROYED returned_true=true
+C5_STAGE5_NATIVE_PASS frames=5 handles=1 destroyed=1 frame_retained=false
+C5_STAGE5_CPU phase=native wall_ms=969 rust_cpu_ms=19.28 luna_children_cpu_ms=47.95 lg_service_cpu_ms=30.00 total_measured_cpu_ms=97.23 one_core_cpu_pct=10.0
+C5_STAGE5_ONESHOT_FRAME index=1 width=320 height=180 bytes=8847 request_ms=168
+C5_STAGE5_ONESHOT_FRAME index=2 width=320 height=180 bytes=9008 request_ms=164
+C5_STAGE5_ONESHOT_FRAME index=3 width=320 height=180 bytes=8990 request_ms=159
+C5_STAGE5_ONESHOT_FRAME index=4 width=320 height=180 bytes=8698 request_ms=158
+C5_STAGE5_ONESHOT_FRAME index=5 width=320 height=180 bytes=8843 request_ms=161
+C5_STAGE5_ONESHOT_PASS frames=5 no_frame_retained=true
+C5_STAGE5_CPU phase=oneshot wall_ms=892 rust_cpu_ms=11.80 luna_children_cpu_ms=93.91 lg_service_cpu_ms=40.00 total_measured_cpu_ms=145.71 one_core_cpu_pct=16.3
+C5_STAGE5_BENCH_PASS native_frames=5 oneshot_frames=5 format=JPEG dimensions=320x180 one_shot_quality_75_requested=true one_shot_quality_verified=false no_frame_retained=true
+C5_STAGE5_RESTORING_STAGE1_AFTER_TEST
+C5_STAGE1_RESTORED_AND_RESCANNED
+STAGE1_HASHES_PASS
+```
+
+The independently rerun `status` reported
+`ABSENT=/var/home/root/c5-ls2-stage5-backup`, and all four original
+Stage 1 executable and policy files passed their stored SHA-256 receipts.
+The temporary `capture.client` authorization is no longer installed.
+
+### Derived comparison — five frames per method (exploratory only)
+
+| Quantity | Native reusable handle | executeOneShot |
+| --- | ---: | ---: |
+| Successfully validated JPEG marker and SOF geometry | 5/5 | 5/5 |
+| Mean *request* latency | 151.6 ms | 162.0 ms |
+| Mean JPEG file bytes | 4,641.6 B | 8,877.2 B |
+| Total wall duration, including media queries and session overhead | 969 ms | 892 ms |
+| Rust process CPU | 19.28 ms | 11.80 ms |
+| `luna-send` children CPU | 47.95 ms | 93.91 ms |
+| LG `captureservice` CPU | 30.00 ms | 40.00 ms |
+| Total measured CPU | 97.23 ms | 145.71 ms |
+| One-core-equivalent CPU utilization during phase | 10.0% | 16.3% |
+
+Five native frames consumed 48.48 ms (~33.3%) less **measured CPU
+time**, and their mean capture request was 10.4 ms (~6.4%) faster.
+However native **whole-phase wall time was longer** (969 vs 892 ms)
+because setup and other overhead are included. Aggregate measured CPU
+is the sum of only the three sampled process categories, **not total
+system consumption**. LG service usage is quantized in 10-ms CPU
+ticks at `clock_hz=100`, so its 10-ms difference is only one tick.
+
+**Most important fairness limitation:** the native JPEG averaged
+4.64 KB versus 8.88 KB for one-shot, and the one-shot quality-75
+request was *not verified as applied*. The output image content
+changed as the video played; neither format-equivalent JPEG quality
+nor visual/decoded-content equivalence was proven. Therefore the CPU
+and latency improvement is *not* a controlled quality-matched
+benchmark, and **do not switch production capture based on it**.
+Only JPEG file size, SOI/EOI and SOF dimensions were validated;
+full JPEG decoding and meaningful frame content remain unverified.
+The file bytes were not retained.
+
+**Usefulness for ambient LEDs:** measured requests of about 150–162 ms
+plus other work would cap sequential capture at only single-digit
+frames/second in this configuration. This is insufficient evidence for
+smooth high-FPS ambient lighting and does not show zero-copy
+capability. The observed five-shot run must not be extrapolated to
+sustained performance or to protected material.
+
+Note: the shared lifecycle diagnostic currently prints
+`max_frames=1` in `C5_HANDLE_TEST_BEGIN` even when Stage 5 actually
+requests five frames. The five indexed native `C5_STAGE5_NATIVE_FRAME`
+lines, `C5_STAGE5_NATIVE_PASS frames=5`, and source loop
+`for number in 1..=frame_limit` provide the authoritative
+verification. Correct the misleading label before any future kit.
+
+### Next recommended investigation (separately authorized)
+
+First perform an offline decoder-quality check using synthetic JPEG
+test fixtures (without capturing new TV material) and source review
+of how `executeOneShot` accepts/ignores JPEG quality fields.
+Then, if a new on-device test is approved, use a deterministic,
+self-owned, DRM-free test clip or calibrated still with a stable
+pattern so both methods see equivalent scenes. Verify full JPEG
+decode, pixel-level usefulness for sampling, and quality settings.
+Separate session-setup time, capture RPC, media checks and per-frame
+read/validation; sample the three CPU categories; abort on any
+Unknown/Protected status. A follow-up high-FPS design should consider
+the separately probed histogram/VT capture path only if its
+protection policy can be enforced without bypassing LG security.
+Do not change factory permissions or the working Stage 1 baseline.
 
 ## Questions Stage 5 should actually answer
 
@@ -23,7 +125,7 @@ files rescanned and SHA-256 checked (`STAGE1_HASHES_PASS`).
 - Does each frame produce a regular, bounded, structurally valid image,
   and can each handle and temporary file be reliably cleaned up?
 
-## Proposed benchmark design (requires separate approval)
+## Original approved benchmark design (completed)
 
 Use exactly five 320×180 BLENDED JPEG captures via the native
 `execute` session and exactly five by the existing,
@@ -79,6 +181,6 @@ production switch. Repeat only after explicit approval.
 
 ## Activation gate
 
-No Stage 5 binary, policy change, installer or device action is
-authorized by this planning document. Only produce and run a new
-artifact after explicit owner approval and passing GitHub CI.
+Stage 5 was separately approved, built with passing ARMv7 and Rust CI,
+executed, then automatically restored to Stage 1. This document does
+not approve any follow-up captures or privilege changes.
