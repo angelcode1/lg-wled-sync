@@ -2,7 +2,7 @@
 """Offline-only LG C5 JPEG audit: full decode, quantization and zone statistics.
 
 This program never connects to the TV, captures a frame, writes an image
-or prints source image bytes. It needs Pillow 12.3.0 for full JPEG decoding.
+or prints source image bytes. It needs Pillow 11.3.0 for full JPEG decoding.
 """
 import argparse
 import hashlib
@@ -17,7 +17,7 @@ from io import BytesIO
 try:
     from PIL import Image, ImageChops, ImageStat, JpegImagePlugin, UnidentifiedImageError
 except ImportError as exc:
-    raise SystemExit("C5_JPEG_AUDIT_DEPENDENCY_REQUIRED: Pillow 12.3.0 (offline only)") from exc
+    raise SystemExit("C5_JPEG_AUDIT_DEPENDENCY_REQUIRED: Pillow 11.3.0 (offline only)") from exc
 
 WIDTH, HEIGHT = 320, 180
 MAX_BYTES = 2 * 1024 * 1024
