@@ -108,6 +108,12 @@ pub use vtcapture::VtCapture;
 /// ABI on newer firmware; use the separately guarded LG-managed BLENDED
 /// screenshot path when native VT cannot provide a safe frame.
 pub fn create_capture(width: u32, height: u32) -> Box<dyn ScreenCapture> {
+    // This exact C5 vendor library was proven unsafe for borrowed pixel reads.
+    // Don't even initialize the VT worker for the known fingerprint.
+    if histogram::is_known_c5_vendor_elf() {
+        warn!("Known C5 VT fingerprint: native frame acquisition disabled; use guarded BLENDED");
+        return Box::new(MockCapture::new(width, height));
+    }
     match VtCapture::try_new(width, height) {
         Ok(capture) => {
             info!("Initialized guarded webOS 6+ libvtcapture.");
