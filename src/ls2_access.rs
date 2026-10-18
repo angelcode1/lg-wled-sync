@@ -213,7 +213,6 @@ pub fn run(acknowledge: bool) -> Result<()> {
     Ok(())
 }
 
-
 /// Exactly one createHandle {} followed by destroyHandle {handle}.
 /// This mutates an LG capture-service session, even though it does not
 /// set an output or execute a screenshot. Never called by the daemon.
@@ -269,57 +268,62 @@ pub fn run_handle_lifecycle(acknowledge: bool) -> Result<()> {
 
             // Bounded requests, no retries, no parallel capture handles, no
             // file output. The same LS2 connection serves both calls.
-            let mut request = |method: &str, request_body: &serde_json::Value| -> Result<serde_json::Value> {
-                reply.received = None;
-                let uri = CString::new(format!("luna://com.webos.service.capture/{method}"))?;
-                let body = CString::new(request_body.to_string())?;
-                let mut token: u32 = 0;
-                checked(*init, *free, "LS2_CALL_FAILED", |err| {
-                    call(
-                        client,
-                        uri.as_ptr(),
-                        body.as_ptr(),
-                        on_reply,
-                        (&mut reply as *mut ReplyState).cast(),
-                        &mut token,
-                        err,
-                    )
-                })?;
-                let start = Instant::now();
-                while reply.received.is_none() && start.elapsed() < Duration::from_secs(2) {
-                    iterate(context, 0);
-                    if reply.received.is_none() {
-                        std::thread::sleep(Duration::from_millis(10));
+            let mut request =
+                |method: &str, request_body: &serde_json::Value| -> Result<serde_json::Value> {
+                    reply.received = None;
+                    let uri = CString::new(format!("luna://com.webos.service.capture/{method}"))?;
+                    let body = CString::new(request_body.to_string())?;
+                    let mut token: u32 = 0;
+                    checked(*init, *free, "LS2_CALL_FAILED", |err| {
+                        call(
+                            client,
+                            uri.as_ptr(),
+                            body.as_ptr(),
+                            on_reply,
+                            (&mut reply as *mut ReplyState).cast(),
+                            &mut token,
+                            err,
+                        )
+                    })?;
+                    let start = Instant::now();
+                    while reply.received.is_none() && start.elapsed() < Duration::from_secs(2) {
+                        iterate(context, 0);
+                        if reply.received.is_none() {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
                     }
-                }
-                let Some(payload) = reply.received.take() else {
-                    // Pending callback remains in stable ReplyState until
-                    // unregister; cancel before returning on timeout.
-                    if token != 0 {
-                        checked(*init, *free, "LS2_CANCEL", |err| {
-                            cancel(client, token, err)
-                        })?;
+                    let Some(payload) = reply.received.take() else {
+                        // Pending callback remains in stable ReplyState until
+                        // unregister; cancel before returning on timeout.
+                        if token != 0 {
+                            checked(*init, *free, "LS2_CANCEL", |err| cancel(client, token, err))?;
+                        }
+                        bail!("LS2_{method}_TIMEOUT_2000MS");
+                    };
+                    let json: serde_json::Value = serde_json::from_str(&payload)
+                        .with_context(|| format!("LS2_{method}_INVALID_REPLY"))?;
+                    if json.get("returnValue").and_then(serde_json::Value::as_bool) != Some(true) {
+                        bail!("LS2_{method}_REJECTED: {payload}");
                     }
-                    bail!("LS2_{method}_TIMEOUT_2000MS");
+                    Ok(json)
                 };
-                let json: serde_json::Value = serde_json::from_str(&payload)
-                    .with_context(|| format!("LS2_{method}_INVALID_REPLY"))?;
-                if json.get("returnValue").and_then(serde_json::Value::as_bool) != Some(true) {
-                    bail!("LS2_{method}_REJECTED: {payload}");
-                }
-                Ok(json)
-            };
 
             let created = request("createHandle", &serde_json::json!({}))?;
-            let handle = created
-                .get("handle")
-                .ok_or_else(|| anyhow::anyhow!("C5_CREATE_HANDLE_MISSING_HANDLE; do not continue"))?;
+            let handle = created.get("handle").ok_or_else(|| {
+                anyhow::anyhow!("C5_CREATE_HANDLE_MISSING_HANDLE; do not continue")
+            })?;
             if !valid_capture_handle(handle) {
                 bail!("C5_CREATE_HANDLE_INVALID_HANDLE");
             }
             let handle = handle.clone();
-            println!("C5_HANDLE_CREATED kind={} no_frame_requested=true",
-                if handle.is_number() { "number" } else { "string" });
+            println!(
+                "C5_HANDLE_CREATED kind={} no_frame_requested=true",
+                if handle.is_number() {
+                    "number"
+                } else {
+                    "string"
+                }
+            );
 
             // Destroy before unregister: no properties, setOutput, execute.
             let _ = request("destroyHandle", &serde_json::json!({"handle": handle}))?;
