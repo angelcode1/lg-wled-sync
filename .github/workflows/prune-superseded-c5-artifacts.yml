@@ -1,0 +1,66 @@
+name: Prune superseded C5 build artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/prune-superseded-c5-artifacts.yml
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: c5-blended-artifact-maintenance
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Remove only superseded C5 blended ARMv7 CI bundles
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GH_REPO" = 'angelcode1/lg-wled-sync'
+          target='c5-blended-armv7'
+          retain=5
+          limit=150
+          tmp="$(mktemp)"
+          trap 'rm -f "$tmp"' EXIT
+          # Only this exact experimental CI artifact name is eligible.
+          # Never touch releases, sources, logs, other build names, or run records.
+          gh api --paginate "repos/$GH_REPO/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name == "c5-blended-armv7" and .expired == false) | [.created_at, (.id|tostring), (.size_in_bytes|tostring), ((.workflow_run.id // 0)|tostring)] | @tsv' \
+            | LC_ALL=C sort -r > "$tmp"
+          count="$(wc -l < "$tmp" | tr -d ' ')"
+          echo "FOUND_MATCHING_ARTIFACTS=$count RETAIN_NEWEST=$retain"
+          echo '## C5 experimental artifact pruning' >> "$GITHUB_STEP_SUMMARY"
+          echo "Eligible name: \`$target\`; newest $retain retained." >> "$GITHUB_STEP_SUMMARY"
+          if (( count <= retain )); then
+            echo 'Nothing superseded; no deletions.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          n=0; deleted=0; saved=0
+          while IFS=$'\t' read -r stamp id bytes run_id; do
+            ((n+=1))
+            [[ "$id" =~ ^[0-9]+$ && "$bytes" =~ ^[0-9]+$ && "$run_id" =~ ^[0-9]+$ ]] || { echo 'INVALID_ARTIFACT_METADATA'; exit 1; }
+            if (( n <= retain )); then
+              echo "KEEP name=$target id=$id run=$run_id date=$stamp"
+              continue
+            fi
+            if (( deleted >= limit )); then
+              echo "STOP_DELETE_LIMIT=$limit"
+              break
+            fi
+            gh api -X DELETE "repos/$GH_REPO/actions/artifacts/$id" >/dev/null
+            ((deleted+=1)); ((saved+=bytes))
+            echo "DELETED_SUPERSEDED name=$target id=$id run=$run_id bytes=$bytes"
+          done < "$tmp"
+          echo "Removed $deleted superseded artifacts ($saved original stored bytes)." >> "$GITHUB_STEP_SUMMARY"
+          echo "C5_CI_ARTIFACT_CLEANUP_COMPLETE removed=$deleted bytes=$saved retained=$retain"
