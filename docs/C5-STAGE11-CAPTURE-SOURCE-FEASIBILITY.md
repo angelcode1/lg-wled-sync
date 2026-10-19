@@ -65,3 +65,68 @@ The source audit should output `"status": "STATIC_SOURCE_CONTRACT_MATCH"`, but r
 If the required source timestamp is fundamentally unavailable, it may still be possible to perform a separate owner-approved optical/source-clock calibration for latency, but that cannot be equated with a guaranteed per-frame device timestamp. Such a future experiment requires a new scope and explicit permission.
 
 **Stop rule:** no source-pointer reads, no protected-frame probes, no device/LS2 mutations, no firmware updates and no light output as part of Stage 11.
+
+
+## Owner Stage 11 verification and closure (2026-10-19)
+
+The operator ran the distributed Stage 11 host-only kit and supplied its
+exact machine-readable `--report` output. The self-test marker reported:
+
+```text
+C5_STAGE11_CAPTURE_CONTRACT_SELFTEST_PASS explicit_unknown=true known_c5_vt_block=true no_auto_permission=true synthetic_complete_needs_review=true source_drift_detected=true symlink_refused=true no_tv_access=true capture=false lights_output=false
+```
+
+The reported `schema` was `c5-stage11-evidence-v1`;
+`deploy_authorized=false`, `device_access=false`. Every one of
+the five candidate entries had `authorizes_capture_or_deployment=false`.
+This is an **operator-supplied offline test result**, not a new C5
+runtime observation.
+
+The five reported decisions were:
+
+| Candidate | Decision | Observed specific gates | Unresolved / failed |
+| --- | --- | --- | --- |
+| `blended_oneshot_png` | `INSUFFICIENT_EVIDENCE` | stable Clear gate, bounded private PNG ownership | 6 unknown, 0 failed |
+| `stage7_native_jpeg_handle` | `INSUFFICIENT_EVIDENCE` | known Clear gate, bounded JPEG artifact ownership | 6 unknown, 0 failed |
+| `vendor_64x48_yuv` | `BLOCKED` | none | 7 unknown, **unsafe VT buffer ownership failed** |
+| `halgal_or_compositor_ui` | `INSUFFICIENT_EVIDENCE` | none | 8 unknown, 0 failed |
+| `protected_content_histogram` | `BLOCKED` | none | 6 unknown, 2 failed (no clear capture gate, unavailable provider) |
+
+The repository CI workflow for commit
+[`997443d89a4ed88c1c0365375450aab34dfae6d6`](https://github.com/angelcode1/lg-wled-sync/commit/997443d89a4ed88c1c0365375450aab34dfae6d6)
+also completed with **success**:
+[GitHub Actions run 39188559965](https://github.com/angelcode1/lg-wled-sync/actions/runs/39188559965).
+This verifies the host-side evidence contract and repository checks;
+it does not prove capture authorization, successful runtime use, or
+hardware throughput.
+
+### Next substantive evidence, without another synthetic phase
+
+1. **First determine the source-time contract of LG screenshot output.**
+   The current `executeOneShot` reply and Rust `BlendedFrame` store
+   request completion only. Search previously owner-supplied, lawfully
+   obtained API/ELF metadata for any *documented actual source-sampling*
+   timestamp and clock origin. Do not interpret `finished`, file mtime
+   or request completion as source time. If no independent source clock
+   exists, report exact frame age as unmeasurable on this path.
+2. **Separate private PNG ownership from native V4L2 ring ownership.**
+   The captured private file is bounded and locally owned; the exact
+   audited C5 VT pointer snapshot still is **not** safely leased. An
+   independent acquire/release/fence ABI and exact-build evidence would
+   be required before revisiting native frame reads.
+3. **Verify permissions and source coverage separately.** A root-shell
+   response or temporary Stage 7 role cannot establish authorisation
+   for the deployed Rust service identity. Compositor/UI screenshots
+   cannot be assumed to include all video planes.
+4. **Only after owner approval and a verified authorised clear source,**
+   define an explicitly bounded real-device timing test with true frame
+   age/provenance (or clearly labelled optical proxy), fresh cadence,
+   CPU budget and teardown. No such capture is authorised by this
+   report. Preserve `Unknown`/`Protected` Hold/black and the exact
+   C5 VT guard.
+
+**Stage 11 disposition:** offline verification **PASS**; all
+capture-path promotion decisions remain **unchanged**. No further
+simulated throughput stage can substitute for missing device/API
+evidence. Production behaviour and the restored Stage 1 installation
+remain untouched.
