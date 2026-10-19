@@ -93,6 +93,11 @@ jobs:
         run: |
           python3 -m py_compile scripts/c5_stage10_freshness.py
           python3 scripts/c5_stage10_freshness.py --selftest
+      - name: Stage 11 capture feasibility and source contract audit (offline only)
+        run: |
+          python3 -m py_compile scripts/c5_stage11_capture_feasibility.py
+          python3 scripts/c5_stage11_capture_feasibility.py --selftest
+          python3 scripts/c5_stage11_capture_feasibility.py --audit-repo .
       - name: Test LG native C++ exception boundary
         run: |
           c++ -std=c++11 -Wall -Wextra -Werror -O2 \
