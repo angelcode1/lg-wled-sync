@@ -89,6 +89,10 @@ jobs:
         run: |
           python3 -m py_compile scripts/c5_stage9_yuv420_perimeter.py
           python3 scripts/c5_stage9_yuv420_perimeter.py --selftest
+      - name: Stage 10 synthetic frame freshness and fail-closed latency (offline only)
+        run: |
+          python3 -m py_compile scripts/c5_stage10_freshness.py
+          python3 scripts/c5_stage10_freshness.py --selftest
       - name: Test LG native C++ exception boundary
         run: |
           c++ -std=c++11 -Wall -Wextra -Werror -O2 \
