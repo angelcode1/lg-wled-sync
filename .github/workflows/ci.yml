@@ -98,6 +98,10 @@ jobs:
           python3 -m py_compile scripts/c5_stage11_capture_feasibility.py
           python3 scripts/c5_stage11_capture_feasibility.py --selftest
           python3 scripts/c5_stage11_capture_feasibility.py --audit-repo .
+      - name: Stage 12 bounded ELF contract inventory (offline only)
+        run: |
+          python3 -m py_compile scripts/c5_stage12_elf_contract_inventory.py
+          python3 scripts/c5_stage12_elf_contract_inventory.py --selftest
       - name: Test LG native C++ exception boundary
         run: |
           c++ -std=c++11 -Wall -Wextra -Werror -O2 \
