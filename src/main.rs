@@ -510,7 +510,7 @@ struct OutputFanout<'a> {
     settings: &'a LiveSettings,
     shared: &'a SharedState,
     wled: &'a mut [(WledUdpStreamer, PerimeterSampler, f32)],
-    hue_transport: &'a mut Option<HueDtlsClient>,
+    hue_transport: &'a mut Option<hue::output::RepeatingHueStream>,
     hue_packets: &'a mut Option<HueStreamPacketBuilder>,
     nanoleaf_transport: &'a mut Option<NanoleafUdpStreamer>,
     nanoleaf_layout: &'a Option<NanoleafPerimeterSampler>,

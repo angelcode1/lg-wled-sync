@@ -7,7 +7,8 @@ pub mod wled;
 
 use crate::color::{pipeline::ColorField, HueGamut, RgbColor};
 use crate::config::LightZone;
-use crate::hue::{HueDtlsClient, HueStreamPacketBuilder};
+use crate::hue::output::RepeatingHueStream;
+use crate::hue::HueStreamPacketBuilder;
 use crate::nanoleaf::NanoleafUdpStreamer;
 use crate::output::perimeter::Point;
 use anyhow::{bail, Result};
@@ -33,7 +34,7 @@ pub trait LightOutput {
 /// Adapter for existing Hue Entertainment v2 transport and authoritative
 /// Entertainment Area channel IDs.
 pub struct HueOutput<'a> {
-    pub transport: &'a mut HueDtlsClient,
+    pub transport: &'a mut RepeatingHueStream,
     pub packets: &'a mut HueStreamPacketBuilder,
     pub channel_ids: &'a [u8],
     pub use_xy: bool,
