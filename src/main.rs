@@ -28,13 +28,15 @@ use tracing_subscriber::FmtSubscriber;
 use capture::drm_routing::{DrmCaptureRouter, HistogramHealth, PlaybackClass, Source};
 use capture::histogram::HistogramCapture;
 use capture::{
-    create_capture, detect_source_fps, release_capture, CaptureRecovery, MockCapture, RecoveryAction,
-    ScreenCapture, VtCapture,
+    create_capture, detect_source_fps, release_capture, CaptureRecovery, MockCapture,
+    RecoveryAction, ScreenCapture, VtCapture,
 };
 use color::pipeline::{ColorField, ColorPipeline};
 use color::{RgbColor, ZoneSampler};
 use config::{Config, ConfigError};
-use hue::{reconnect::HueReconnect, sync_entertainment_areas, HueDtlsClient, HueStreamPacketBuilder};
+use hue::{
+    reconnect::HueReconnect, sync_entertainment_areas, HueDtlsClient, HueStreamPacketBuilder,
+};
 use nanoleaf::{NanoleafPerimeterSampler, NanoleafUdpStreamer};
 use output::gate::OutputGate;
 use output::perimeter::PerimeterSampler;
