@@ -7,6 +7,8 @@
 
 Native ambient-light synchronization for rooted LG webOS TVs. A Rust daemon captures the displayed image, derives spatial colours, and streams them to Philips Hue Entertainment and Nanoleaf 4D. A responsive LAN dashboard provides pairing, calibration, presets, and independent output controls.
 
+> **Research disclaimer:** This project is intended for research and educational purposes only.
+
 ## Features
 
 - Root-only webOS capture through dynamically loaded `libvtcapture`/`dile_vt` APIs.

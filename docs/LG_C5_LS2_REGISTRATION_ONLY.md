@@ -1,5 +1,12 @@
 # LG C5: registration-only Luna diagnostic (no capture)
 
+> Historical diagnostic record. Current `main` uses anonymous registration by
+> default and `--named-probe` for the app's exact owned name. The old
+> `--capture-client` option is rejected. The generated LG name modes and role
+> installation commands below describe older experiments; use the
+> [current owned-name diagnostic](../security/c5-own-name-registration/README.md)
+> for current behavior. These notes do not authorize policy installation.
+
 Status: **both independent LS2 name families now register and unregister successfully** on the owner's C5 after installing the reviewed stage-two regular role. Both were previously rejected individually with `-1027 Invalid permissions`. The native histogram has not produced a sample. HDMI HDCP remains `Unknown`.
 
 ## Purpose and provenance

@@ -148,14 +148,14 @@ enum Commands {
         #[arg(long)]
         acknowledge_device_open: bool,
     },
-    /// Register/unregister a temporary private LS2 name without loading the VT capture driver
+    /// Register/unregister an anonymous client or the app's own private LS2 name
     TestLs2Registration {
         /// Explicitly acknowledge an active Luna bus registration attempt
         #[arg(long)]
         acknowledge_luna_registration: bool,
-        /// Probe native VT's capture-client LSRegister name instead of Resource Manager
+        /// Register the app's own exact name (requires a separately installed role)
         #[arg(long)]
-        capture_client: bool,
+        named_probe: bool,
     },
     /// Discover and pair with a Philips Hue Bridge via pushlink button
     Pair {
@@ -178,6 +178,44 @@ enum Commands {
         #[arg(short, long, default_value = "config.json")]
         config: PathBuf,
     },
+}
+
+#[cfg(test)]
+mod ls2_registration_cli_tests {
+    use super::*;
+
+    #[test]
+    fn registration_supports_anonymous_and_owned_name_modes() {
+        for named_probe in [false, true] {
+            let mut args = vec![
+                "lg-hue-sync",
+                "test-ls2-registration",
+                "--acknowledge-luna-registration",
+            ];
+            if named_probe {
+                args.push("--named-probe");
+            }
+            let cli = Cli::try_parse_from(args).expect("parse registration diagnostic");
+            assert!(matches!(
+                cli.command,
+                Commands::TestLs2Registration {
+                    acknowledge_luna_registration: true,
+                    named_probe: parsed_name,
+                } if parsed_name == named_probe
+            ));
+        }
+    }
+
+    #[test]
+    fn retired_capture_client_mode_is_rejected_before_dispatch() {
+        assert!(Cli::try_parse_from([
+            "lg-hue-sync",
+            "test-ls2-registration",
+            "--acknowledge-luna-registration",
+            "--capture-client",
+        ])
+        .is_err());
+    }
 }
 
 #[tokio::main]
@@ -234,8 +272,8 @@ async fn main() -> Result<()> {
         } => run_test_v4l2_current_format(acknowledge_device_open),
         Commands::TestLs2Registration {
             acknowledge_luna_registration,
-            capture_client,
-        } => ls2_probe::run(acknowledge_luna_registration, capture_client),
+            named_probe,
+        } => ls2_probe::run(acknowledge_luna_registration, named_probe),
         Commands::Pair { bridge, output } => run_pair(bridge, output).await,
         Commands::SyncHue { config, area } => run_sync_hue(config, area).await,
         Commands::PairNanoleaf { ip, config } => run_pair_nanoleaf(ip, config).await,
