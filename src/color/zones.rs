@@ -7,10 +7,13 @@ use std::time::{Duration, Instant};
 
 pub(crate) const REFERENCE_FRAME: Duration = Duration::from_nanos(33_333_333);
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RgbColor {
+    #[schema(minimum = 0, maximum = 255)]
     pub r: u8,
+    #[schema(minimum = 0, maximum = 255)]
     pub g: u8,
+    #[schema(minimum = 0, maximum = 255)]
     pub b: u8,
 }
 
@@ -306,6 +309,23 @@ impl ColorProcessor {
         self.max_color_step = step.max(1);
     }
 
+    /// Shared per-colour adjustment; sampling and temporal response remain separate.
+    pub fn transform_color(&self, mut target: FloatColor) -> FloatColor {
+        if self.noise_gate_threshold > 0.0 {
+            target = target.apply_noise_gate(self.noise_gate_threshold);
+        }
+        if self.saturation_boost > 1.0 {
+            target = target.boost_saturation(self.saturation_boost);
+        }
+        if (self.gamma - 1.0).abs() >= 0.01 {
+            target = target.apply_gamma(self.gamma);
+        }
+        if self.hdr_tone_mapping {
+            target = target.tone_map_hdr();
+        }
+        target
+    }
+
     pub fn process(
         &self,
         mean: FloatColor,
@@ -322,18 +342,7 @@ impl ColorProcessor {
         } else {
             mean
         };
-        if self.noise_gate_threshold > 0.0 {
-            target = target.apply_noise_gate(self.noise_gate_threshold);
-        }
-        if self.saturation_boost > 1.0 {
-            target = target.boost_saturation(self.saturation_boost);
-        }
-        if (self.gamma - 1.0).abs() >= 0.01 {
-            target = target.apply_gamma(self.gamma);
-        }
-        if self.hdr_tone_mapping {
-            target = target.tone_map_hdr();
-        }
+        target = self.transform_color(target);
         if self.strict_blackout && target == FloatColor::default() {
             return target;
         }
@@ -762,6 +771,7 @@ mod tests {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
+            hue_positions: Vec::new(),
             x_min: 0.0,
             x_max: 1.0,
             y_min: 0.0,
@@ -838,6 +848,7 @@ mod tests {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
+            hue_positions: Vec::new(),
             x_min: 0.0,
             x_max: 1.0,
             y_min: 0.0,
@@ -1061,6 +1072,7 @@ mod tests {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
+            hue_positions: Vec::new(),
             x_min: 0.0,
             x_max: 1.0,
             y_min: 0.0,

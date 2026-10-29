@@ -77,6 +77,8 @@ jobs:
             native/lg_frame_guard.cpp native/test_frame_guard.cpp \
             -o "$RUNNER_TEMP/test_frame_guard"
           "$RUNNER_TEMP/test_frame_guard"
+      - name: Test native toolchain scripts
+        run: python3 scripts/test_native_toolchain.py
       - name: Enforce rustfmt
         run: cargo fmt --all -- --check
       - name: Run locked Rust test suite
@@ -103,7 +105,7 @@ jobs:
           done
           docker info
       - name: Build 32-bit ARMv7 binary using Debian Buster toolchain
-        run: make build
+        run: make build-docker
       - name: Verify ARM ELF machine and required glibc versions
         shell: bash
         run: |
@@ -166,4 +168,11 @@ jobs:
       - name: Publish verified daemon release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" release/* --verify-tag --generate-notes
+        run: |
+          awk -v version="${GITHUB_REF_NAME#v}" '
+            index($0, "## [" version "]") == 1 { found=1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+          gh release create "${GITHUB_REF_NAME}" release/* --verify-tag --title "LG Hue Sync ${GITHUB_REF_NAME}" --notes-file release-notes.md

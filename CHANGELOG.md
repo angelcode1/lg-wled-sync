@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-29
+
+### Added
+- Add demand-driven HDMI frame capture and optional live thumbnails to Advanced tuning, using the existing capture pipeline with bounded 128×72 previews at up to one frame per second.
+- Preview static colour adjustments using the daemon's shared colour processing, with optional Hue device regions and Nanoleaf perimeter overlays. Explain unsupported spatial, temporal and physical-light effects in a preview information popup.
+- Save custom tuning per ambient style, retain the selected style, and restore factory defaults with Reset. Preserve legacy settings and keep pairing, device placement and output trims separate from preset overrides.
+- Add cached, read-only input/output diagnostics for HDMI, display output and internal-player information where the TV exposes it. Distinguish source properties from display output; unavailable fields remain unavailable.
+
+### Changed
+- Organize the dashboard into Tuning, Devices and Diagnostics tabs, with compact screen-sync and follow-TV-power controls.
+- Combine the adjusted colour preview and light layout, place ambient styles above it, and use horizontally scrolling vertical response faders with larger focus targets.
+- Place Save/Reset in Advanced tuning, remove preview pinning, and show contextual fader explanations without repetitive live-preview status announcements.
+
+### Validation
+- All 118 Rust tests, dashboard preview/preset checks, formatting, warnings-denied Clippy and embedded JavaScript syntax checks passed for 1.0.0. Launcher packaging and native-build safety tests passed. Native ARMv7 builds passed ELF/ABI, loader and glibc <= 2.28 checks.
+- The feature build passed on-TV binary hash, service/dashboard health and HDMI frame capture checks, with paired configuration preserved and a verified rollback binary. Built-in Netflix and HDMI observations distinguished internal-player properties from display output.
+- Published assets are built independently by Docker CI. The release binary is not the previously deployed feature binary; physical colour accuracy, touchscreen interaction and CPU impact were not measured. MAT/Atmos decoding and audio capture are not provided. Launcher-only IPKs and manifests remain unpublished.
+
+## [0.9.1] - 2026-10-28
+
+### Fixed
+- Show one Hue preview box per physical device, combining the sampling bounds of its streaming channels. Keep different devices and legacy channels separate; use a representative average sampled colour for multichannel previews only.
+- Replace segment-range labels with the device name and retain channel details in the tooltip. Add large orientation glyphs when Hue supplies enough service layout points; the monitor end marks front toward the TV wall, not LED facing.
+- Preserve optional Hue layout points for preview orientation without changing sampling regions, channel IDs, segment membership, or output processing. Missing or invalid geometry does not invent orientation.
+
+### Validation
+- All 105 Rust tests, preview grouping/orientation checks, formatting, warnings-denied Clippy, dashboard syntax and release metadata checks passed. Native ARMv7 builds passed ELF/ABI, loader and glibc <= 2.28 checks.
+- Local browser checks confirmed eight device boxes, one Flux strip label and accessible orientation glyphs using captured layout data. TV deployment is verified separately from the independently built Docker CI release artifact.
+- Physical LED facing, colour accuracy and alternative sampling strategies were not tested or changed. Launcher-only IPKs and manifests remain unpublished.
+
+## [0.9.0] - 2026-10-28
+
+### Added
+- Generate and serve `/openapi.json` with `utoipa` and `utoipa-axum`, covering all 16 API routes, request/response types, validation bounds and error responses. Cache the description at server startup.
+- Add opt-in Bonjour HTTP advertising with dashboard and OpenAPI links. Discovery defaults to off for new and existing configurations; disabling it shuts down its mDNS thread and sockets.
+- Add a dashboard Bonjour toggle and `POST /api/bonjour` to persist and apply discovery changes without restarting capture or lighting. Report the saved preference through `/api/status`; failed saves leave discovery unchanged.
+
+### Changed
+- Group Bonjour discovery and Restart Pipeline in a collapsed Maintenance panel at the bottom of the dashboard. Move Save to Disk to an accessible header glyph beside the theme control.
+- Register API routes and OpenAPI metadata together while preserving existing URLs and request formats. Document plain-text JSON extraction errors alongside application JSON errors.
+
+### Validation
+- All 104 Rust tests, formatting, warnings-denied Clippy, dashboard syntax and release metadata checks passed. Native ARMv7 builds passed ELF32, little-endian ARM EABI5 soft-float, loader and glibc <= 2.28 checks.
+- Before the version bump, feature builds passed on-TV binary hash, service, dashboard and OpenAPI checks. Bonjour enable/disable persisted correctly, started/stopped its mDNS thread without changing the daemon PID, and restored the original configuration byte-for-byte; discovery was left off.
+- Published daemon assets are built independently by Docker CI. Third-party client discovery, multicast visibility, resource impact and physical lighting output were not validated for this release. Launcher-only IPKs and manifests remain unpublished.
+
+## [0.8.0] - 2026-10-22
+
+### Added
+- Track Hue ownership and partial configuration changes through a bounded SSE subscription; refresh the selected layout before first output and after topology changes.
+- Discover bridges through local mDNS with a rate-limited cloud fallback; recover changed addresses only for the saved Bridge ID.
+- Repeat cached Hue packets at 50 Hz independently of capture cadence. Adaptive deadband still suppresses new colour-update submissions; no additional sampling is performed for repeats.
+
+### Changed
+- Pair exclusively over verified HTTPS using both official Hue root CAs and the Bridge ID. Migrate existing leaf pins only after an exact match, then accept signed certificate renewal for that identity.
+- Use the separate application ID from `/auth/v1` for DTLS authentication and stream ownership. Preserve pairing credentials when area selection is still required.
+- Delegate the deprecated Python pairing helper to the host Rust CLI; remove plaintext pairing and direct Hyperion mutation.
+- Update architecture, operations, agent and skill guidance with recovery rules and current Hue documentation findings.
+
+### Fixed
+- Refuse automatic takeover and avoid deliberately stopping another application's Hue stream. Suspend Hue independently of Nanoleaf on ownership loss.
+- Stop cached Hue output on revoked authorization, deleted areas or failed topology refresh; keep stale mappings blocked across manual Start, Restart and output re-enable.
+- Use configured Hue channel IDs in the test pattern instead of inventing fixed channels.
+
+### Validation
+- All 97 Rust tests, formatting, warnings-denied Clippy, dashboard syntax and release metadata checks passed. Launcher packaging and native-build safety tests passed; launcher packages remain unpublished.
+- The native v0.8.0 artifact passed on-TV SHA-256, service, verified HTTPS pairing, legacy-pin identity migration, DTLS and SSE checks with zero automatic service restarts. HDMI capture returned to 60 FPS; Home released capture and paused outputs; returning to HDMI resumed them. Manual Stop survived input changes.
+- Disabling Hue left Nanoleaf and capture running; disabling Nanoleaf left Hue running. Both outputs were restored. Pairing replaced only Hue credentials/identity and preserved Nanoleaf configuration.
+- Competing-owner runtime testing was intentionally omitted at the maintainer's request; ownership guards have host-test coverage only. Colour accuracy, CPU impact and packet-loss performance were not measured.
+- The maintainer confirmed both Hue and Nanoleaf visibly syncing after restoration; this was a functional visual check, not a colour-accuracy or latency measurement.
+- The cached Docker fallback also compiled. Published daemon assets are built independently by Docker CI and are not the TV-tested native artifact.
+
+## [0.7.0] - 2026-10-22
+
+### Added
+- Automatically pause capture on known built-in apps/Home and retry when HDMI returns, while preserving manual Stop. Show an explicit unsupported-input state instead of repeated driver initialization attempts.
+- Add macOS-native ARMv7 cross-builds using the webOS Brew compiler and a Buster/glibc 2.28 sysroot bootstrapped once from the cached builder. Validate ELF class, endianness, ARM EABI5 soft-float ABI, loader and glibc requirements before atomic artifact replacement.
+- Add Rust Ares launcher packaging and explicit-device install, launch and app-list commands, preserving the Homebrew manifest and selecting the exact current package instead of a stale filename.
+- Expose requested sync state, actual lifecycle state, readiness and capture failures separately; release capture resources before reporting stopped and show lifecycle transitions in the dashboard.
+- Add packaging and native-build safety tests, Codex build/package actions, and an isolated cargo-zigbuild experiment with verified ARM/glibc output.
+
+### Changed
+- Make `make build` use the native macOS toolchain after successful TV service/capture validation. Keep `make build-docker` as the explicit fallback and Linux CI path; separate native and Docker toolchain update commands.
+- Remove unused hard-float Cross/Cargo settings; preserve `armv7-unknown-linux-gnueabi` and the glibc 2.28 ceiling.
+- Improve dashboard spacing, contrast and status presentation while keeping Glasshouse and LG Hue Sync separately owned.
+- Package the launcher before full deployment mutates the TV. Keep paired configuration, checksum verification and a recoverable previous daemon binary.
+
+### Fixed
+- Keep Luna query stdin open until the asynchronous response arrives; bound reply size and process lifetime, share transport across source/power/video queries, and limit source frame-rate polling to once every two seconds.
+- Preserve Faulted/error state when an explicit Stop cancels a capture Restart, including commands received during the restart delay.
+- Run periodic Hue Bridge status polling in a separate worker, reject superseded results, and wait for stop cleanup before checking for app-driven resume.
+- Move Hue reconnect and session cleanup to a serial background worker; discard superseded results and keep Nanoleaf and control processing running while Hue reconnects.
+- Reject malformed Hue client keys without UTF-8 slicing panics, and share a five-second DTLS handshake deadline across retries and socket operations.
+- Bound Nanoleaf pairing requests, response bodies, polling delays and panel-layout retrieval by the remaining pairing deadline.
+
+### Validation
+- Native v0.7.0 passed a live HDMI → app/Home → HDMI transition: hardware capture released and both rates reached zero on the unsupported source, then 60 FPS hardware capture resumed automatically and the error cleared. Binary SHA-256 matched and paired configuration stayed unchanged; all 89 Rust tests and packaging/build safety tests passed.
+- A preliminary native v0.6.1 build passed TV binary checksum, unchanged configuration, dashboard and service checks, with zero restarts, 320x180/60 FPS hardware capture, and Hue/Nanoleaf connected. Subsequent built-in app tests motivated the explicit input policy. Physical lighting quality was not measured.
+- The Zig candidate passed local ELF/ABI/glibc inspection only; it was not deployed. Published daemon assets are built by the Docker CI fallback and are not the TV-tested native artifact. Launcher-only IPKs and Homebrew manifests remain unpublished.
+
 ## [0.6.1] - 2026-10-08
 
 ### Added

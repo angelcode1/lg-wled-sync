@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -46,7 +47,7 @@ pub enum ConfigError {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct LightZone {
     pub channel_id: u8,
     pub name: String,
@@ -58,6 +59,9 @@ pub struct LightZone {
     pub hue_segment_index: Option<u8>,
     #[serde(default)]
     pub hue_segment_count: Option<u8>,
+    /// Hue service layout points in room coordinates, for preview orientation only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hue_positions: Vec<[f32; 3]>,
     /// Normalized coordinates: 0.0 to 1.0
     pub x_min: f32,
     pub x_max: f32,
@@ -98,6 +102,7 @@ impl LightZone {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
+            hue_positions: Vec::new(),
             x_min,
             x_max,
             y_min,
@@ -124,17 +129,18 @@ pub struct NanoleafConfig {
     pub alignment: NanoleafAlignment,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct NanoleafAlignment {
     #[serde(default)]
     pub start_corner: NanoleafStartCorner,
     #[serde(default)]
     pub reverse_direction: bool,
     #[serde(default)]
+    #[schema(minimum = 0, maximum = 39)]
     pub perimeter_offset: u8,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum NanoleafStartCorner {
     #[default]
@@ -176,8 +182,33 @@ fn default_wled_port() -> u16 {
     crate::output::wled::DEFAULT_PORT
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PresetTuning {
+    pub brightness_multiplier: f32,
+    pub saturation_boost: f32,
+    pub peak_weight: f32,
+    pub spatial_blend: f32,
+    pub gamma: f32,
+    pub noise_gate_threshold: f32,
+    pub smoothing_factor: f32,
+    pub rise_smoothing_factor: f32,
+    pub fall_smoothing_factor: f32,
+    pub strict_blackout: bool,
+    pub max_color_step: u8,
+    pub use_xy_gamut: bool,
+    pub letterbox_detection: bool,
+    pub hdr_tone_mapping: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub active_preset: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub preset_overrides: BTreeMap<String, PresetTuning>,
+    /// Advertise the dashboard and OpenAPI URL over Bonjour.
+    #[serde(default)]
+    pub bonjour_enabled: bool,
     /// Automatically pause/resume outputs with the TV's active/standby state.
     #[serde(default = "default_true")]
     pub auto_tv_power: bool,
@@ -189,6 +220,9 @@ pub struct Config {
     pub bridge_ip: String,
     pub username: String,
     pub clientkey: String,
+    /// Stable identity checked against the Hue-signed certificate, independent of IP/renewal.
+    #[serde(default)]
+    pub hue_bridge_id: Option<String>,
     /// SHA-256 fingerprint of the bridge's local V2 HTTPS certificate.
     #[serde(default)]
     pub hue_bridge_certificate_sha256: Option<String>,
@@ -324,6 +358,7 @@ fn default_zones() -> Vec<LightZone> {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
+            hue_positions: Vec::new(),
             x_min: 0.0,
             x_max: 0.25,
             y_min: 0.1,
@@ -335,6 +370,7 @@ fn default_zones() -> Vec<LightZone> {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
+            hue_positions: Vec::new(),
             x_min: 0.2,
             x_max: 0.8,
             y_min: 0.0,
@@ -346,6 +382,7 @@ fn default_zones() -> Vec<LightZone> {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
+            hue_positions: Vec::new(),
             x_min: 0.75,
             x_max: 1.0,
             y_min: 0.1,
@@ -357,6 +394,7 @@ fn default_zones() -> Vec<LightZone> {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
+            hue_positions: Vec::new(),
             x_min: 0.2,
             x_max: 0.8,
             y_min: 0.7,
@@ -366,6 +404,32 @@ fn default_zones() -> Vec<LightZone> {
 }
 
 impl Config {
+    pub fn apply_hue_pairing(&mut self, bridge_ip: String, paired: crate::hue::PairedBridge) {
+        self.bridge_ip = bridge_ip;
+        self.username = paired.username;
+        self.clientkey = paired.clientkey;
+        self.hue_bridge_id = Some(paired.bridge_id);
+        self.hue_bridge_certificate_sha256 = Some(paired.certificate_sha256);
+        self.hue_enabled = true;
+        self.hue_sync_enabled = true;
+        self.entertainment_configuration_id = paired
+            .area
+            .as_ref()
+            .map(|area| area.configuration_id.clone());
+        self.entertainment_area_id = self
+            .entertainment_configuration_id
+            .clone()
+            .unwrap_or_default();
+        self.zones = paired.area.map(|area| area.zones).unwrap_or_default();
+    }
+
+    pub fn hue_trust(&self) -> crate::hue::BridgeTrust<'_> {
+        crate::hue::BridgeTrust {
+            bridge_id: self.hue_bridge_id.as_deref(),
+            certificate_sha256: self.hue_bridge_certificate_sha256.as_deref(),
+        }
+    }
+
     fn validate_capture_dimensions(&self, path: &Path) -> Result<(), ConfigError> {
         // Bounds both native capture requests and MockCapture's u32 RGBA allocation math.
         if self.capture_width == 0
@@ -405,12 +469,16 @@ impl Config {
 
     pub fn new_default(bridge_ip: &str, username: &str, clientkey: &str, area_id: &str) -> Self {
         Self {
+            active_preset: None,
+            preset_overrides: BTreeMap::new(),
+            bonjour_enabled: false,
             auto_tv_power: true,
             hue_enabled: false,
             hue_sync_enabled: false,
             bridge_ip: bridge_ip.to_string(),
             username: username.to_string(),
             clientkey: clientkey.to_string(),
+            hue_bridge_id: None,
             hue_bridge_certificate_sha256: None,
             entertainment_area_id: area_id.to_string(),
             entertainment_configuration_id: None,
@@ -578,6 +646,120 @@ fn lock_config(path: &Path) -> Result<File, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_configs_start_without_preset_overrides() {
+        let mut value = serde_json::to_value(Config::new_default("", "", "", "")).unwrap();
+        value.as_object_mut().unwrap().remove("active_preset");
+        value.as_object_mut().unwrap().remove("preset_overrides");
+        let config: Config = serde_json::from_value(value).unwrap();
+        assert!(config.active_preset.is_none() && config.preset_overrides.is_empty());
+        assert!(serde_json::to_value(config)
+            .unwrap()
+            .get("preset_overrides")
+            .is_none());
+    }
+
+    #[test]
+    fn preset_overrides_round_trip_without_replacing_pairing_or_output_settings() {
+        let path = std::env::temp_dir().join(format!(
+            "lg-hue-sync-preset-config-{}-{}.json",
+            std::process::id(),
+            NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut initial = Config::new_default(
+            "fixture-bridge",
+            "fixture-key",
+            "fixture-client-key",
+            "fixture-area",
+        );
+        initial.hue_output_brightness = 0.75;
+        initial.nanoleaf_output_brightness = 1.25;
+        initial.bonjour_enabled = true;
+        Config::update(&path, Some(initial), |_| Ok(())).unwrap();
+        let tuning = PresetTuning {
+            brightness_multiplier: 1.2,
+            saturation_boost: 1.5,
+            peak_weight: 0.25,
+            spatial_blend: 0.1,
+            gamma: 1.1,
+            noise_gate_threshold: 0.025,
+            smoothing_factor: 0.35,
+            rise_smoothing_factor: 0.4,
+            fall_smoothing_factor: 0.2,
+            strict_blackout: true,
+            max_color_step: 14,
+            use_xy_gamut: false,
+            letterbox_detection: true,
+            hdr_tone_mapping: false,
+        };
+        Config::update(&path, None, |config| {
+            config.active_preset = Some("neutralReference".into());
+            config
+                .preset_overrides
+                .insert("neutralReference".into(), tuning.clone());
+            Ok(())
+        })
+        .unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.active_preset.as_deref(), Some("neutralReference"));
+        assert_eq!(
+            loaded.preset_overrides.get("neutralReference"),
+            Some(&tuning)
+        );
+        assert_eq!(loaded.username, "fixture-key");
+        assert_eq!(loaded.clientkey, "fixture-client-key");
+        assert_eq!(loaded.bridge_ip, "fixture-bridge");
+        assert_eq!(loaded.entertainment_area_id, "fixture-area");
+        assert_eq!(
+            (
+                loaded.hue_output_brightness,
+                loaded.nanoleaf_output_brightness
+            ),
+            (0.75, 1.25)
+        );
+        assert!(loaded.bonjour_enabled);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("json.lock"));
+    }
+
+    #[test]
+    fn pairing_without_an_area_keeps_credentials_but_clears_old_mapping() {
+        let mut config = Config::new_default("old", "old", "old", "old-area");
+        let paired = crate::hue::PairedBridge {
+            username: "test-application-key".into(),
+            clientkey: "00".repeat(16),
+            area: None,
+            bridge_id: "001788fffe000001".into(),
+            certificate_sha256: "aa".repeat(32),
+        };
+        config.apply_hue_pairing("192.0.2.1".into(), paired);
+        assert_eq!(config.username, "test-application-key");
+        assert_eq!(config.clientkey, "00".repeat(16));
+        assert_eq!(config.hue_bridge_id.as_deref(), Some("001788fffe000001"));
+        assert!(config.hue_enabled && config.hue_sync_enabled);
+        assert!(config.entertainment_configuration_id.is_none());
+        assert!(config.entertainment_area_id.is_empty() && config.zones.is_empty());
+    }
+
+    #[test]
+    fn bonjour_is_opt_in_for_new_and_existing_configs() {
+        let config = Config::new_default("", "", "", "");
+        assert!(!config.bonjour_enabled);
+        let mut value = serde_json::to_value(config).unwrap();
+        value.as_object_mut().unwrap().remove("bonjour_enabled");
+        assert!(
+            !serde_json::from_value::<Config>(value.clone())
+                .unwrap()
+                .bonjour_enabled
+        );
+        value["bonjour_enabled"] = true.into();
+        assert!(
+            serde_json::from_value::<Config>(value)
+                .unwrap()
+                .bonjour_enabled
+        );
+    }
 
     #[test]
     fn new_configs_disable_unverified_hdr_curve_without_changing_legacy_missing_field() {

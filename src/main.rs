@@ -1,9 +1,11 @@
 mod capture;
+mod capture_source;
 mod color;
 mod config;
 mod hue;
 mod local_http;
 mod ls2_probe;
+mod luna;
 mod nanoleaf;
 mod output;
 mod runtime;
@@ -26,21 +28,21 @@ use tracing_subscriber::FmtSubscriber;
 use capture::drm_routing::{DrmCaptureRouter, HistogramHealth, PlaybackClass, Source};
 use capture::histogram::HistogramCapture;
 use capture::{
-    create_capture, detect_source_fps, CaptureRecovery, MockCapture, RecoveryAction, ScreenCapture,
-    VtCapture,
+    create_capture, detect_source_fps, release_capture, CaptureRecovery, MockCapture, RecoveryAction,
+    ScreenCapture, VtCapture,
 };
 use color::pipeline::{ColorField, ColorPipeline};
 use color::{RgbColor, ZoneSampler};
 use config::{Config, ConfigError};
-use hue::{sync_entertainment_areas, HueDtlsClient, HueStreamPacketBuilder};
+use hue::{reconnect::HueReconnect, sync_entertainment_areas, HueDtlsClient, HueStreamPacketBuilder};
 use nanoleaf::{NanoleafPerimeterSampler, NanoleafUdpStreamer};
 use output::gate::OutputGate;
 use output::perimeter::PerimeterSampler;
 use output::wled::WledUdpStreamer;
 use output::{ColorSource, HueOutput, LightFrame, LightOutput};
-use runtime::{PendingCommands, PipelineState, RetryState};
+use runtime::{CaptureSourcePolicy, PendingCommands, PipelineState, RetryState};
 use setup::{run_pair, run_pair_nanoleaf, run_sync_hue};
-use web::{start_web_server, CalibrationPattern, LiveSettings, SharedState};
+use web::{start_web_server, CalibrationPattern, LiveSettings, SharedState, SyncState};
 
 #[derive(Parser)]
 #[command(name = "lg-hue-sync")]
@@ -280,16 +282,32 @@ async fn main() -> Result<()> {
     }
 }
 
-fn reconnect_hue(config: &Config) -> Result<HueDtlsClient> {
+struct ConnectedHue {
+    output: hue::output::RepeatingHueStream,
+    bridge_ip: String,
+}
+
+fn reconnect_hue(config: &Config) -> Result<ConnectedHue> {
+    let verified = hue::connect_bridge_tls(&config.bridge_ip, config.hue_trust())?;
+    let mut resolved = config.clone();
+    resolved.bridge_ip = verified.get_ref().peer_addr()?.ip().to_string();
+    drop(verified);
+    let config = &resolved;
     set_hue_stream_active(config, true)?;
-    HueDtlsClient::connect(&config.bridge_ip, &config.username, &config.clientkey)
+    let application_id =
+        hue::fetch_application_id(&config.bridge_ip, &config.username, config.hue_trust())?;
+    let client = HueDtlsClient::connect(&config.bridge_ip, &application_id, &config.clientkey)?;
+    Ok(ConnectedHue {
+        output: hue::output::RepeatingHueStream::new(client)?,
+        bridge_ip: config.bridge_ip.clone(),
+    })
 }
 
 fn hue_configuration_id(config: &Config) -> Option<String> {
     config
         .entertainment_configuration_id
         .as_deref()
-        .filter(|id| id.len() == 36)
+        .filter(|id| hue::valid_configuration_id(id))
         .map(ToOwned::to_owned)
 }
 
@@ -300,9 +318,104 @@ fn set_hue_stream_active(config: &Config, active: bool) -> Result<()> {
         &config.bridge_ip,
         &config.username,
         &configuration_id,
-        config.hue_bridge_certificate_sha256.as_deref(),
+        config.hue_trust(),
         active,
     )
+}
+
+struct HueStatus {
+    events: hue::events::HueEvents,
+    enabled: bool,
+    blocked: bool,
+    needs_refresh: bool,
+}
+
+impl HueStatus {
+    fn new() -> Result<Self> {
+        let events = hue::events::HueEvents::new(
+            |config| {
+                let id = hue_configuration_id(config)
+                    .ok_or_else(|| anyhow!("Select a Hue Entertainment Area"))?;
+                let mut snapshot = hue::fetch_stream_configuration(
+                    &config.bridge_ip,
+                    &config.username,
+                    &id,
+                    config.hue_trust(),
+                )?;
+                let app_id = hue::fetch_application_id(
+                    &config.bridge_ip,
+                    &config.username,
+                    config.hue_trust(),
+                )?;
+                snapshot["_application_id"] = serde_json::Value::String(app_id);
+                Ok(snapshot)
+            },
+            |config| {
+                use std::io::Write;
+                if !config.hue_trust().known() || !hue::valid_application_key(&config.username) {
+                    anyhow::bail!("Invalid Hue application key");
+                }
+                let mut stream = hue::connect_bridge_tls(&config.bridge_ip, config.hue_trust())?;
+                let socket = stream.get_ref().try_clone()?;
+                socket.set_read_timeout(Some(Duration::from_secs(60)))?;
+                write!(stream, "GET /eventstream/clip/v2 HTTP/1.1\r\nHost: {}\r\nhue-application-key: {}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n", config.bridge_ip, config.username)?;
+                stream.flush()?;
+                Ok(hue::events::EventConnection::new(Box::new(stream), socket))
+            },
+        )?;
+        Ok(Self {
+            events,
+            enabled: false,
+            blocked: false,
+            needs_refresh: false,
+        })
+    }
+
+    fn request(&mut self, config: Option<&Config>) {
+        if self.enabled == config.is_some() {
+            return;
+        }
+        self.enabled = config.is_some();
+        self.events.request(config);
+    }
+}
+
+fn poll_hue_status(
+    worker: &mut HueStatus,
+    config: &Config,
+    commands: &mut PendingCommands,
+) -> Option<hue::StreamState> {
+    worker.request(Some(config));
+    match worker.events.poll()? {
+        Ok(event) => {
+            commands.sync_bridge |= event.topology_changed || worker.needs_refresh;
+            worker.blocked |= event.topology_changed;
+            worker.needs_refresh |= event.topology_changed;
+            let application_id = event
+                .configuration
+                .get("_application_id")
+                .and_then(serde_json::Value::as_str)?;
+            match hue::parse_stream_state(&event.configuration, application_id) {
+                Ok(mut state) => {
+                    if event.stream_interrupted {
+                        state.active = false;
+                    }
+                    Some(state)
+                }
+                Err(error) => {
+                    warn!("Hue state unavailable: {error:#}");
+                    None
+                }
+            }
+        }
+        Err(error) => {
+            worker.blocked |= error
+                .downcast_ref::<hue::events::SessionInvalid>()
+                .is_some();
+            warn!("Hue events unavailable: {error:#}");
+            None
+        }
+    }
 }
 
 fn calibration_pattern(state: &SharedState) -> Option<CalibrationPattern> {
@@ -460,19 +573,8 @@ impl OutputFanout<'_> {
                         Err(error) => {
                             self.shared.hue_connected.store(false, Ordering::Relaxed);
                             warn!("{} output error: {error}", adapter.kind());
-                            if self.hue_retry.ready() {
-                                match reconnect_hue(self.config) {
-                                    Ok(new_dtls) => {
-                                        *dtls = new_dtls;
-                                        self.hue_retry.success();
-                                        self.shared.hue_connected.store(true, Ordering::Relaxed);
-                                    }
-                                    Err(err) => {
-                                        self.hue_retry.failure();
-                                        warn!("Hue reconnect failed: {err}");
-                                    }
-                                }
-                            }
+                            *self.hue_transport = None;
+                            self.hue_retry.failure();
                         }
                     }
                 }
@@ -611,26 +713,33 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     } else {
         None
     };
-    let pipeline_should_run = observed_tv_power != Some(false);
+    let startup_requested = observed_tv_power != Some(false);
+    let initial_source = crate::capture_source::current_source().await;
+    info!("Foreground capture source: {}", initial_source.label());
+    let mut source_policy =
+        CaptureSourcePolicy::new(initial_source.compatible(), startup_requested);
+    let pipeline_should_run = startup_requested && !source_policy.blocked();
     if !pipeline_should_run && hue_active {
         let _ = set_hue_stream_active(&config, false);
     }
 
-    if hue_active && hue_configuration_id(&config).is_none() {
+    if hue_active {
         let bridge_identity = (
             config.bridge_ip.clone(),
             config.username.clone(),
             config.hue_bridge_certificate_sha256.clone(),
+            config.hue_bridge_id.clone(),
         );
         match sync_entertainment_areas(
             &config.bridge_ip,
             &config.username,
             config.entertainment_configuration_id.as_deref(),
-            config.hue_bridge_certificate_sha256.as_deref(),
+            config.hue_trust(),
         ) {
             Ok(area) => {
                 config.entertainment_area_id = area.configuration_id.clone();
                 config.entertainment_configuration_id = Some(area.configuration_id);
+                config.hue_bridge_id = Some(area.bridge_id.clone());
                 config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
                 config.zones = area.zones;
                 if let Err(error) = Config::update(&config_path, None, |current| {
@@ -638,10 +747,12 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         current.bridge_ip.as_str(),
                         current.username.as_str(),
                         current.hue_bridge_certificate_sha256.as_ref(),
+                        current.hue_bridge_id.as_ref(),
                     ) != (
                         bridge_identity.0.as_str(),
                         bridge_identity.1.as_str(),
                         bridge_identity.2.as_ref(),
+                        bridge_identity.3.as_ref(),
                     ) {
                         anyhow::bail!("Hue Bridge configuration changed during sync; retry");
                     }
@@ -650,6 +761,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         config.entertainment_configuration_id.clone();
                     current.hue_bridge_certificate_sha256 =
                         config.hue_bridge_certificate_sha256.clone();
+                    current.hue_bridge_id = config.hue_bridge_id.clone();
                     current.zones = config.zones.clone();
                     Ok(())
                 }) {
@@ -660,7 +772,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 }
             }
             Err(error) => warn!(
-                "Hue V2 configuration discovery failed; using legacy packet header: {}",
+                "Hue configuration refresh failed; retaining saved configuration: {}",
                 error
             ),
         }
@@ -723,17 +835,13 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     // 1. Initialize Philips Hue DTLS client if active
     let mut hue_sync_enabled = config.hue_sync_enabled;
     let mut nanoleaf_sync_enabled = config.nanoleaf_sync_enabled;
-    let mut hue_dtls = if hue_active && hue_sync_enabled && pipeline_should_run {
-        match reconnect_hue(&config) {
-            Ok(client) => Some(client),
-            Err(error) => {
-                warn!("Hue unavailable at start; keeping other outputs running: {error}");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let mut hue_dtls = None;
+    let mut hue_reconnect =
+        HueReconnect::new(reconnect_hue, |config| set_hue_stream_active(config, false))?;
+    let mut hue_status = HueStatus::new()?;
+    // The first SSE snapshot triggers a layout refresh before Hue output starts.
+    hue_status.blocked = hue_active;
+    hue_status.needs_refresh = hue_active;
 
     let mut hue_sampler = if hue_active {
         Some(ZoneSampler::new(
@@ -878,7 +986,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
     // Determine target framerate (supports auto-matching source refresh rate 23.976..60.0 Hz)
     let detected_fps = if config.fps == 0 {
-        detect_source_fps()
+        detect_source_fps().await
     } else {
         None
     };
@@ -956,9 +1064,14 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         config.zones.clone(),
         command_tx,
     ));
-    shared_state
-        .is_syncing
-        .store(pipeline_should_run, Ordering::Relaxed);
+    shared_state.configure_presets(
+        config.active_preset.clone(),
+        config.preset_overrides.clone(),
+    );
+    shared_state.set_requested_running(startup_requested);
+    if !pipeline_should_run {
+        shared_state.set_sync_state(SyncState::Paused, None);
+    }
     shared_state.set_tv_power_state(observed_tv_power);
     shared_state.set_fps(target_fps as f32);
 
@@ -978,6 +1091,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let web_shutdown = CancellationToken::new();
     let web_tasks = match start_web_server(
         8088,
+        config.bonjour_enabled,
         shared_state.clone(),
         config_path.clone(),
         web_shutdown.clone(),
@@ -996,7 +1110,6 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut output_gate = OutputGate::default();
     let mut light_update_count = 0u32;
     let mut light_update_window = tokio::time::Instant::now();
-    let mut last_status_check = tokio::time::Instant::now();
     let mut capture_retry = RetryState::new();
     if !capture.is_real_hardware() {
         capture_retry.failure();
@@ -1005,12 +1118,14 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut capture_faulted = false;
     let mut last_tv_power_poll = tokio::time::Instant::now() - Duration::from_secs(2);
     let mut last_tv_power_warning = tokio::time::Instant::now() - Duration::from_secs(30);
+    let mut last_source_fps_poll = tokio::time::Instant::now();
     let mut hue_retry = RetryState::new();
     let mut nanoleaf_retry = RetryState::new();
     let mut pending_commands = PendingCommands {
         desired_running: (!pipeline_should_run).then_some(false),
         ..PendingCommands::default()
     };
+    let mut last_source_poll = tokio::time::Instant::now() - Duration::from_secs(2);
     let mut pipeline_state = if pipeline_should_run {
         PipelineState::Running
     } else {
@@ -1019,10 +1134,16 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
     'sync_loop: while running.load(Ordering::SeqCst) {
         pending_commands.receive(&mut command_rx);
+        source_policy.manual_request(pending_commands.manual_running.take());
         let loop_start = tokio::time::Instant::now();
         let mut emitted_light_update = false;
 
         watchdog.tick();
+
+        if last_source_poll.elapsed() >= Duration::from_secs(2) {
+            last_source_poll = tokio::time::Instant::now();
+            source_policy.observe(crate::capture_source::current_source().await.compatible());
+        }
 
         if auto_tv_power && last_tv_power_poll.elapsed() >= Duration::from_secs(2) {
             last_tv_power_poll = tokio::time::Instant::now();
@@ -1038,7 +1159,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                             "TV power changed: {}",
                             if active { "active" } else { "standby" }
                         );
-                        if pending_commands.desired_running.is_none() {
+                        if pending_commands.desired_running.is_none()
+                            && !source_policy.manually_stopped()
+                        {
                             pending_commands.desired_running = Some(active);
                         }
                     }
@@ -1056,38 +1179,60 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
 
         // 1. Check for web UI or external stop requests
+        if pending_commands.desired_running == Some(true) || pending_commands.restart {
+            hue_status.blocked = hue_status.needs_refresh;
+        }
         let web_stop_requested = pending_commands.take_stop_if_running(pipeline_state);
-        // Hue external control affects only Hue, never WLED or Nanoleaf.
-        // Periodically verify the Hue Entertainment Area ownership (every 5s)
-        if last_status_check.elapsed() >= Duration::from_secs(5) {
-            last_status_check = tokio::time::Instant::now();
-            if hue_active && hue_sync_enabled && hue_dtls.is_some() {
-                if let Some(configuration_id) = hue_configuration_id(&config) {
-                    if let Ok(state) = hue::get_stream_state(
-                        &config.bridge_ip,
-                        &config.username,
-                        &configuration_id,
-                        config.hue_bridge_certificate_sha256.as_deref(),
-                    ) {
-                        if !state.active {
-                            hue_sync_enabled = false;
-                            hue_dtls = None;
-                            shared_state.hue_connected.store(false, Ordering::Relaxed);
-                            info!("Hue external stream stopped; WLED/Nanoleaf remain active");
-                        }
-                        // The Hue app's smoothing preference is device-specific.
-                        // Do not apply it as a second processing pass to all vendors.
-                    }
+
+        // Bridge reads run on their own worker; only current-session results affect output.
+        if hue_active
+            && hue_sync_enabled
+            && !web_stop_requested
+            && !pending_commands.has_management_action()
+        {
+            if let Some(state) = poll_hue_status(&mut hue_status, &config, &mut pending_commands) {
+                if !state.active && hue_dtls.is_some() {
+                    // Ownership loss suspends Hue only; Nanoleaf keeps its own session.
+                    hue_status.blocked = true;
+                }
+                if let Some(ref mut sampler) = hue_sampler {
+                    sampler.set_smoothing_factor(state.smoothing_factor);
                 }
             }
+        } else {
+            hue_status.request(None);
         }
 
-        if web_stop_requested || pipeline_state == PipelineState::Paused {
+        if hue_status.blocked {
+            hue_dtls = None;
+            hue_reconnect.request(None);
+            shared_state.hue_connected.store(false, Ordering::Relaxed);
+        }
+
+        if source_policy.blocked()
+            && pipeline_state == PipelineState::Running
+            && !capture_faulted
+            && !web_stop_requested
+        {
+            source_policy.pause_for_source();
+        }
+        if web_stop_requested || pipeline_state == PipelineState::Paused || source_policy.blocked()
+        {
             info!(
                 "Sync was stopped/paused (web={}). Entering paused idle state...",
                 web_stop_requested
             );
-            shared_state.is_syncing.store(false, Ordering::SeqCst);
+            if !capture_faulted {
+                shared_state.set_sync_state(SyncState::Stopping, None);
+            }
+            release_capture(&mut capture);
+            shared_state
+                .capture_hardware
+                .store(false, Ordering::Relaxed);
+            shared_state.set_fps(0.0);
+            shared_state.set_light_update_fps(0.0);
+            light_update_count = 0;
+            light_update_window = tokio::time::Instant::now();
             pipeline_state = PipelineState::Paused;
             // Release the LG histogram owner even while waiting in the
             // paused-management loop; never leave VT resources pinned.
@@ -1117,12 +1262,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 });
             }
 
-            // Deactivate Hue stream on bridge if web requested stop
-            if (web_stop_requested || (auto_tv_power && observed_tv_power == Some(false)))
-                && hue_active
-            {
-                let _ = set_hue_stream_active(&config, false);
-            }
+            hue_status.request(None);
+            hue_reconnect.request(None);
             hue_dtls = None;
             shared_state.hue_connected.store(false, Ordering::Relaxed);
 
@@ -1135,13 +1276,30 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             shared_state
                 .nanoleaf_connected
                 .store(false, Ordering::Relaxed);
+            if source_policy.source_paused() && source_policy.blocked() {
+                shared_state.set_sync_state(SyncState::UnsupportedSource, Some("Built-in apps and Home are not supported by this capture backend; select HDMI to resume.".into()));
+            } else if !capture_faulted {
+                shared_state.set_sync_state(SyncState::Paused, None);
+            }
 
             while running.load(Ordering::SeqCst) {
                 tokio::time::sleep(watchdog.pause_poll_period()).await;
                 pending_commands.receive(&mut command_rx);
+                source_policy.manual_request(pending_commands.manual_running.take());
                 watchdog.tick();
+                if last_source_poll.elapsed() >= Duration::from_secs(2) {
+                    last_source_poll = tokio::time::Instant::now();
+                    source_policy
+                        .observe(crate::capture_source::current_source().await.compatible());
+                }
+                if source_policy.source_paused() && source_policy.blocked() {
+                    shared_state.set_sync_state(SyncState::UnsupportedSource, Some("Built-in apps and Home are not supported by this capture backend; select HDMI to resume.".into()));
+                } else if source_policy.manually_stopped() && !capture_faulted {
+                    shared_state.set_sync_state(SyncState::Paused, None);
+                }
+                pending_commands.resume_fault_for_restart(capture_faulted);
                 if pending_commands.has_management_action()
-                    && pending_commands.desired_running != Some(true)
+                    && (pending_commands.desired_running != Some(true) || source_policy.blocked())
                 {
                     break;
                 }
@@ -1155,17 +1313,16 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     last_tv_power_poll = tokio::time::Instant::now() - Duration::from_secs(2);
                 }
 
-                let requested_running = pending_commands.desired_running.take();
+                let mut requested_running = pending_commands.desired_running.take();
                 if capture_faulted {
-                    if requested_running != Some(true) {
+                    if requested_running != Some(true) && !source_policy.auto_resume() {
                         continue;
                     }
                     // A manual Start retries a fault; TV/app auto-resume must not loop on it.
-                    capture_faulted = false;
-                    capture_recovery = CaptureRecovery::default();
                     pending_commands.restart = true;
                 }
-                let mut start_requested = requested_running == Some(true);
+                let mut start_requested =
+                    requested_running == Some(true) || source_policy.auto_resume();
                 if auto_tv_power && last_tv_power_poll.elapsed() >= Duration::from_secs(2) {
                     last_tv_power_poll = tokio::time::Instant::now();
                     match tv_power::is_active().await {
@@ -1173,6 +1330,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                             shared_state.set_tv_power_state(state);
                             let active = state.unwrap();
                             if requested_running.is_none()
+                                && !source_policy.manually_stopped()
                                 && observed_tv_power == Some(false)
                                 && active
                             {
@@ -1190,54 +1348,73 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         }
                     }
                 }
-                let mut app_reactivated = false;
-                if !start_requested
+                let app_reactivated = if !start_requested
+                    && !source_policy.manually_stopped()
+                    && !source_policy.blocked()
+                    && requested_running != Some(false)
                     && hue_active
+                    && hue_sync_enabled
+                    && hue_reconnect.is_settled()
                     && !(auto_tv_power && observed_tv_power == Some(false))
                 {
-                    if let Some(configuration_id) = hue_configuration_id(&config) {
-                        if let Ok(st) = hue::get_stream_state(
-                            &config.bridge_ip,
-                            &config.username,
-                            &configuration_id,
-                            config.hue_bridge_certificate_sha256.as_deref(),
-                        ) {
-                            if st.active {
-                                app_reactivated = true;
-                            }
-                        }
-                    }
-                }
+                    poll_hue_status(&mut hue_status, &config, &mut pending_commands)
+                        .is_some_and(|state| state.active)
+                } else {
+                    hue_status.request(None);
+                    false
+                };
 
-                if start_requested || app_reactivated {
+                // A Stop received during an awaited observation must beat auto-resume.
+                pending_commands.receive(&mut command_rx);
+                source_policy.manual_request(pending_commands.manual_running.take());
+                if pending_commands.reconfigure {
+                    break;
+                }
+                if let Some(latest) = pending_commands.desired_running.take() {
+                    requested_running = Some(latest);
+                    start_requested = latest;
+                }
+                if source_policy.blocked() {
+                    if start_requested {
+                        source_policy.pause_for_source();
+                    }
+                    continue;
+                }
+                if (start_requested || app_reactivated)
+                    && !source_policy.manually_stopped()
+                    && !(auto_tv_power
+                        && observed_tv_power == Some(false)
+                        && requested_running != Some(true))
+                {
+                    source_policy.resumed();
+                    hue_status.request(None);
                     info!(
                         "Sync resume requested! Reactivating Hue & Nanoleaf streaming sessions..."
                     );
-                    let mut hue_resumed = !hue_active || !hue_sync_enabled;
-                    if hue_active && hue_sync_enabled {
-                        match reconnect_hue(&config) {
-                            Ok(client) => {
-                                info!("[+] Re-established Hue DTLS streaming session.");
-                                hue_dtls = Some(client);
-                                shared_state.hue_connected.store(true, Ordering::Relaxed);
-                                hue_resumed = true;
-                            }
-                            Err(e) => {
-                                error!("Failed to re-establish Hue DTLS streaming session: {}", e);
-                                shared_state.hue_connected.store(false, Ordering::Relaxed);
-                            }
-                        }
+                    if requested_running == Some(true) {
+                        hue_status.blocked = hue_status.needs_refresh;
+                    }
+                    if hue_active && hue_sync_enabled && !hue_status.blocked {
+                        hue_reconnect.request(Some(&config));
                     }
 
-                    if !hue_resumed
-                        && !(config.wled_sync_enabled && !wled_outputs.is_empty())
-                        && !(nanoleaf_active && nanoleaf_sync_enabled)
-                    {
-                        shared_state.is_syncing.store(false, Ordering::SeqCst);
-                        continue;
+                    if !capture_faulted {
+                        shared_state.set_sync_state(SyncState::Starting, None);
                     }
-
-                    shared_state.is_syncing.store(true, Ordering::SeqCst);
+                    if !pending_commands.restart {
+                        drm_router = DrmCaptureRouter::default();
+                        drm_router.set_mode(config.capture_mode);
+                        capture = Box::new(MockCapture::new(
+                            config.capture_width,
+                            config.capture_height,
+                        ));
+                    }
+                    shared_state
+                        .capture_hardware
+                        .store(capture.is_real_hardware(), Ordering::Relaxed);
+                    shared_state.set_fps(target_fps as f32);
+                    capture_retry.success();
+                    capture_recovery = CaptureRecovery::default();
                     pipeline_state = PipelineState::Running;
 
                     if nanoleaf_active && nanoleaf_sync_enabled {
@@ -1296,25 +1473,20 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
             *shared_state.hue_zones.write().unwrap() = config.zones.clone();
             if hue_sync_enabled != live_st.hue_sync_enabled {
+                hue_status.request(None);
                 hue_sync_enabled = live_st.hue_sync_enabled;
-                if hue_sync_enabled && pipeline_state == PipelineState::Running {
-                    match reconnect_hue(&config) {
-                        Ok(client) => {
-                            hue_dtls = Some(client);
-                            shared_state.hue_connected.store(true, Ordering::Relaxed);
-                        }
-                        Err(error) => {
-                            hue_sync_enabled = false;
-                            shared_state.hue_connected.store(false, Ordering::Relaxed);
-                            warn!("Hue sync remains off: {}", error);
-                        }
-                    }
-                } else {
-                    let _ = set_hue_stream_active(&config, false);
-                    hue_dtls = None;
-                    shared_state.hue_connected.store(false, Ordering::Relaxed);
-                }
+                hue_status.blocked = hue_status.needs_refresh;
+                hue_dtls = None;
+                shared_state.hue_connected.store(false, Ordering::Relaxed);
+                hue_retry.success();
+                hue_reconnect.request(
+                    (hue_sync_enabled
+                        && !hue_status.blocked
+                        && pipeline_state == PipelineState::Running)
+                        .then_some(&config),
+                );
             }
+
             if nanoleaf_sync_enabled != live_st.nanoleaf_sync_enabled {
                 nanoleaf_sync_enabled = live_st.nanoleaf_sync_enabled;
                 if nanoleaf_sync_enabled && pipeline_state == PipelineState::Running {
@@ -1407,7 +1579,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         // 3. Check for save config request from Web UI
         if !pending_commands.save_config.is_empty() {
             let live_st = shared_state.current_settings.read().unwrap().clone();
+            let (active_preset, preset_overrides) = shared_state.preset_save_snapshot(&live_st);
             let result = Config::update(&config_path, Some(config.clone()), |save_cfg| {
+                save_cfg.active_preset = active_preset.clone();
+                save_cfg.preset_overrides = preset_overrides.clone();
                 save_cfg.brightness_multiplier = live_st.brightness_multiplier;
                 save_cfg.hue_output_brightness = live_st.hue_output_brightness;
                 save_cfg.nanoleaf_output_brightness = live_st.nanoleaf_output_brightness;
@@ -1432,6 +1607,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             .map(|_| ())
             .map_err(|error| error.to_string());
             if result.is_ok() {
+                shared_state.mark_presets_saved(preset_overrides);
                 info!("[+] Successfully saved live settings to {:?}", config_path);
             } else if let Err(ref error) = result {
                 error!(
@@ -1445,25 +1621,32 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
 
         if std::mem::take(&mut pending_commands.sync_bridge) && hue_active {
+            hue_status.blocked = true;
+            hue_status.needs_refresh = true;
+            shared_state.hue_connected.store(false, Ordering::Relaxed);
+            // Stop repeating the old layout before fetching changed channel membership.
+            hue_dtls = None;
+            hue_reconnect.request(None);
             let bridge_identity = (
                 config.bridge_ip.clone(),
                 config.username.clone(),
                 config.hue_bridge_certificate_sha256.clone(),
+                config.hue_bridge_id.clone(),
             );
             match sync_entertainment_areas(
                 &config.bridge_ip,
                 &config.username,
                 config.entertainment_configuration_id.as_deref(),
-                config.hue_bridge_certificate_sha256.as_deref(),
+                config.hue_trust(),
             ) {
                 Ok(area) if !area.zones.is_empty() => {
+                    hue_status.blocked = false;
+                    hue_status.needs_refresh = false;
                     let configuration_changed = config.entertainment_configuration_id.as_deref()
                         != Some(&area.configuration_id);
-                    if configuration_changed {
-                        let _ = set_hue_stream_active(&config, false);
-                    }
                     config.entertainment_area_id = area.configuration_id.clone();
                     config.entertainment_configuration_id = Some(area.configuration_id);
+                    config.hue_bridge_id = Some(area.bridge_id.clone());
                     config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
                     config.zones = area.zones;
                     *shared_state.hue_zones.write().unwrap() = config.zones.clone();
@@ -1488,31 +1671,29 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         sampler.set_max_color_step(live_st.max_color_step);
                     }
                     if configuration_changed {
+                        hue_status.request(None);
                         hue_packet_builder =
                             Some(HueStreamPacketBuilder::new(hue_configuration_id(&config)));
-                        if hue_sync_enabled && pipeline_state == PipelineState::Running {
-                            match reconnect_hue(&config) {
-                                Ok(client) => {
-                                    hue_dtls = Some(client);
-                                    shared_state.hue_connected.store(true, Ordering::Relaxed);
-                                }
-                                Err(error) => {
-                                    hue_dtls = None;
-                                    shared_state.hue_connected.store(false, Ordering::Relaxed);
-                                    warn!("Hue area changed but DTLS rebind failed: {}", error);
-                                }
-                            }
-                        }
+                        hue_dtls = None;
+                        shared_state.hue_connected.store(false, Ordering::Relaxed);
+                        hue_retry.success();
+                        hue_reconnect.request(
+                            (hue_sync_enabled && pipeline_state == PipelineState::Running)
+                                .then_some(&config),
+                        );
                     }
+
                     if let Err(error) = Config::update(&config_path, None, |current| {
                         if (
                             current.bridge_ip.as_str(),
                             current.username.as_str(),
                             current.hue_bridge_certificate_sha256.as_ref(),
+                            current.hue_bridge_id.as_ref(),
                         ) != (
                             bridge_identity.0.as_str(),
                             bridge_identity.1.as_str(),
                             bridge_identity.2.as_ref(),
+                            bridge_identity.3.as_ref(),
                         ) {
                             anyhow::bail!("Hue Bridge configuration changed during sync; retry");
                         }
@@ -1521,6 +1702,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                             config.entertainment_configuration_id.clone();
                         current.hue_bridge_certificate_sha256 =
                             config.hue_bridge_certificate_sha256.clone();
+                        current.hue_bridge_id = config.hue_bridge_id.clone();
                         current.zones = config.zones.clone();
                         Ok(())
                     }) {
@@ -1543,6 +1725,54 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
         }
 
+        if let Some(result) = hue_reconnect.poll() {
+            match result {
+                Ok(client)
+                    if hue_active
+                        && hue_sync_enabled
+                        && pipeline_state == PipelineState::Running
+                        && !hue_status.blocked =>
+                {
+                    if config.bridge_ip != client.bridge_ip {
+                        let previous_ip = config.bridge_ip.clone();
+                        config.bridge_ip = client.bridge_ip.clone();
+                        *shared_state.hue_bridge_ip.write().unwrap() = config.bridge_ip.clone();
+                        if let Err(error) = Config::update(&config_path, None, |current| {
+                            if current.bridge_ip != previous_ip
+                                || current.username != config.username
+                                || current.hue_bridge_id != config.hue_bridge_id
+                            {
+                                anyhow::bail!("Hue Bridge configuration changed during address recovery; retry");
+                            }
+                            current.bridge_ip = config.bridge_ip.clone();
+                            Ok(())
+                        }) {
+                            warn!("Recovered Hue address could not be persisted: {error:#}");
+                        }
+                    }
+                    hue_dtls = Some(client.output);
+                    hue_retry.success();
+                    shared_state.hue_connected.store(true, Ordering::Relaxed);
+                    info!("[+] Re-established Hue DTLS streaming session.");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    let delay = hue_retry.failure();
+                    warn!("Hue reconnect failed: {error:#}. Retrying in {delay:?}.");
+                }
+            }
+        }
+        if hue_active
+            && hue_sync_enabled
+            && pipeline_state == PipelineState::Running
+            && hue_dtls.is_none()
+            && !hue_status.blocked
+            && !hue_reconnect.pending()
+            && hue_retry.ready()
+        {
+            hue_reconnect.request(Some(&config));
+        }
+
         // 4. Check for pipeline restart request from Web UI
         if std::mem::take(&mut pending_commands.reconfigure) {
             info!("Device credentials saved; restarting daemon to load the new configuration.");
@@ -1551,13 +1781,16 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
         if std::mem::take(&mut pending_commands.restart) {
             info!("Pipeline restart requested via Web UI. Re-initializing capture...");
-            drop(std::mem::replace(
-                &mut capture,
-                Box::new(MockCapture::new(
-                    config.capture_width,
-                    config.capture_height,
-                )),
-            ));
+            if source_policy.blocked() {
+                if !source_policy.manually_stopped() {
+                    source_policy.pause_for_source();
+                }
+                continue 'sync_loop;
+            }
+            if !capture_faulted {
+                shared_state.set_sync_state(SyncState::Stopping, None);
+            }
+            release_capture(&mut capture);
             shared_state
                 .capture_hardware
                 .store(false, Ordering::Relaxed);
@@ -1565,7 +1798,18 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 break 'sync_loop;
             }
             pending_commands.receive(&mut command_rx);
-            if pending_commands.desired_running == Some(false) || pending_commands.reconfigure {
+            source_policy.manual_request(pending_commands.manual_running.take());
+            source_policy.observe(crate::capture_source::current_source().await.compatible());
+            last_source_poll = tokio::time::Instant::now();
+            pending_commands.receive(&mut command_rx);
+            source_policy.manual_request(pending_commands.manual_running.take());
+            if pending_commands.capture_restart_cancelled()
+                || source_policy.blocked()
+                || source_policy.manually_stopped()
+            {
+                if source_policy.blocked() && !source_policy.manually_stopped() {
+                    source_policy.pause_for_source();
+                }
                 continue 'sync_loop;
             }
             capture_faulted = false;
@@ -1595,21 +1839,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             continue 'sync_loop;
         }
 
-        // Reconnect each configured vendor independently.
-        if hue_active && hue_sync_enabled && hue_dtls.is_none() && hue_retry.ready() {
-            match reconnect_hue(&config) {
-                Ok(client) => {
-                    hue_dtls = Some(client);
-                    hue_retry.success();
-                    shared_state.hue_connected.store(true, Ordering::Relaxed);
-                    output_gate.clear();
-                }
-                Err(err) => {
-                    hue_retry.failure();
-                    warn!("Hue reconnect unavailable: {err}");
-                }
-            }
-        }
+        // Nanoleaf retries independently; Hue uses its asynchronous worker above.
         if nanoleaf_active
             && nanoleaf_sync_enabled
             && nanoleaf_streamer.is_none()
@@ -1637,8 +1867,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
 
         // In auto FPS mode, dynamically update cadence if TV source rate changed (e.g. film started)
-        if config.fps == 0 {
-            if let Some(new_fps) = detect_source_fps() {
+        if config.fps == 0 && last_source_fps_poll.elapsed() >= Duration::from_secs(2) {
+            last_source_fps_poll = tokio::time::Instant::now();
+            if let Some(new_fps) = detect_source_fps().await {
                 let clamped = new_fps.clamp(20.0, 60.0);
                 if (clamped - target_fps).abs() > 0.5 {
                     target_fps = clamped;
@@ -1889,6 +2120,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 }
                 Err(error) => {
                     let delay = capture_retry.failure();
+                    shared_state.set_sync_state(
+                        SyncState::Recovering,
+                        Some(format!("Hardware capture unavailable: {error:#}")),
+                    );
                     warn!("Hardware capture unavailable ({error:#}); retrying in {delay:?}");
                 }
             }
@@ -1898,7 +2133,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         match capture.acquire_frame() {
             Ok(frame) => {
                 if hardware_frame {
+                    shared_state.preview.publish(&frame);
                     capture_recovery.frame_received(std::time::Instant::now());
+                    shared_state.set_sync_state(SyncState::Running, None);
                 }
                 // Processing is independent of which outputs are enabled.
                 // A synthetic MockCapture is never published to real lights.
@@ -1933,6 +2170,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 }
             }
             Err(e) => {
+                shared_state.set_sync_state(SyncState::Recovering, Some(e.to_string()));
                 let delay = match capture_recovery.failed(&e) {
                     RecoveryAction::Retry => {
                         if !runtime::wait_for_capture_retry(frame_interval, &shutdown).await {
@@ -1950,6 +2188,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                             .capture_hardware
                             .store(false, Ordering::Relaxed);
                         capture_faulted = true;
+                        shared_state.set_sync_state(SyncState::Faulted, Some(e.to_string()));
                         pending_commands.desired_running = Some(false);
                         continue 'sync_loop;
                     }
@@ -1975,13 +2214,24 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 }
                 watchdog.tick();
                 pending_commands.receive(&mut command_rx);
-                if pending_commands.desired_running == Some(false) || pending_commands.reconfigure {
+                source_policy.manual_request(pending_commands.manual_running.take());
+                source_policy.observe(crate::capture_source::current_source().await.compatible());
+                last_source_poll = tokio::time::Instant::now();
+                pending_commands.receive(&mut command_rx);
+                source_policy.manual_request(pending_commands.manual_running.take());
+                if pending_commands.capture_restart_cancelled()
+                    || source_policy.blocked()
+                    || source_policy.manually_stopped()
+                {
+                    if source_policy.blocked() && !source_policy.manually_stopped() {
+                        source_policy.pause_for_source();
+                    }
                     continue 'sync_loop;
                 }
 
                 // Auto-adapt to new source refresh rate if enabled
                 if config.fps == 0 {
-                    if let Some(new_fps) = detect_source_fps() {
+                    if let Some(new_fps) = detect_source_fps().await {
                         let clamped = new_fps.clamp(20.0, 60.0);
                         if (clamped - target_fps).abs() > 0.5 {
                             target_fps = clamped;
@@ -2024,11 +2274,18 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
     }
 
-    // Cleanup: deactivate Hue stream
-    if hue_active {
-        info!("Deactivating entertainment area stream on Hue Bridge...");
-        let _ = set_hue_stream_active(&config, false);
-    }
+    shared_state.set_sync_state(SyncState::Stopping, None);
+    release_capture(&mut capture);
+    shared_state
+        .capture_hardware
+        .store(false, Ordering::Relaxed);
+    shared_state.set_fps(0.0);
+    shared_state.set_light_update_fps(0.0);
+
+    // Join the serial worker after invalidating every in-flight reconnect.
+    drop(hue_dtls);
+    drop(hue_status);
+    drop(hue_reconnect);
 
     signal_task.abort();
     let _ = signal_task.await;
@@ -2052,8 +2309,11 @@ async fn run_test_pattern(config_path: PathBuf) -> Result<()> {
 
     set_hue_stream_active(&config, true)?;
 
-    let mut dtls_client =
-        HueDtlsClient::connect(&config.bridge_ip, &config.username, &config.clientkey)?;
+    let mut dtls_client = HueDtlsClient::connect(
+        &config.bridge_ip,
+        &hue::fetch_application_id(&config.bridge_ip, &config.username, config.hue_trust())?,
+        &config.clientkey,
+    )?;
 
     let mut packet_builder = HueStreamPacketBuilder::new(hue_configuration_id(&config));
     info!("Streaming fast rainbow test pattern across all Hue entertainment channels for 15 seconds...");
@@ -2063,9 +2323,10 @@ async fn run_test_pattern(config_path: PathBuf) -> Result<()> {
         let hue_offset = (start.elapsed().as_secs_f32() * 180.0) % 360.0; // Fast rotation (180 deg/sec)
         let mut channels = Vec::new();
 
-        // Broadcast across all 8 channels in the entertainment area (lights + gradient lightstrip)
-        for channel_id in 0..8u8 {
-            let hue = (hue_offset + (channel_id as f32) * 45.0) % 360.0;
+        // Address only channels returned by the selected Entertainment configuration.
+        for (index, zone) in config.zones.iter().enumerate() {
+            let channel_id = zone.channel_id;
+            let hue = (hue_offset + (index as f32) * 45.0) % 360.0;
             let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
             channels.push((channel_id, RgbColor::new(r, g, b).to_u16()));
         }
