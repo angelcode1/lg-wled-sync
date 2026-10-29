@@ -1,12 +1,12 @@
 # LG DRM-first histogram capture + vendor-neutral output (development)
 
-Branch: feature/vendor-neutral-wled-drm-first
+Implementation: main; originally developed on feature/vendor-neutral-wled-drm-first
 Base: adeze/lg-hue-sync v0.6.1
 Reference: user-supplied HyperDRM-main.zip (HyperDRM 0.13.0)
 
 ## One shared colour-processing pipeline
 
-This feature branch now uses one `ColorPipeline` (`src/color/pipeline.rs`)
+The main implementation uses one `ColorPipeline` (`src/color/pipeline.rs`)
 and one `OutputFanout` (`src/main.rs`) for normal and DRM-first playback.
 
 ```text
@@ -72,13 +72,16 @@ geometry/transport adapter, without writing another colour-processing path.
 - `src/output/gate.rs`: independent per-device frame suppression and reset
 - `src/output/wled.rs`: DRGB/DNRGB segmentation boundaries
 
-The new Rust tests have **not been executed here**, because this environment
-has no Rust compiler, Cargo, rustfmt or ARMv7 cross-compiler. Also, the fork
-currently reports no GitHub Actions workflow runs. The CI gates below must
-pass before deploying to an actual TV. In particular, native histogram ABI
-and LG DRM behaviour are still unverified on the target model.
+Validation status refreshed on 2026-10-29: the [main CI run](https://github.com/angelcode1/lg-wled-sync/actions/runs/39257202708)
+for `5e1e9cc8d1cbb0e3af4aeae275dfaedb79cfc542` passed Rust formatting,
+locked nextest, Clippy, native C++ guards, dashboard JavaScript syntax and
+the ARMv7 / webOS glibc <= 2.28 gate. Rust and Docker are unavailable in the
+current inspection environment, so those build results are CI evidence.
+Local verification passed nine Python tests, both native C++ tests, log
+maintenance and dashboard/launcher JavaScript syntax. Build success does
+not establish working capture or physical light output on a specific TV.
 
-## Implemented in the feature branch
+## Implemented on main
 
 - Normal frame capture remains based on the existing libvtcapture / DILE_VT code.
 - Playback classification polls the read-only Luna getActivePipelines endpoint at a one-second ceiling.
@@ -118,23 +121,35 @@ IP address; existing Hue/Nanoleaf configurations remain loadable.
 
 ## Not yet established
 
-- This Rust code has not passed cargo fmt, cargo nextest, clippy or ARMv7
-  cross-build in this editing environment: Rust tools were unavailable.
-- The updated CI workflow includes this feature branch, but GitHub returned
-  no workflow runs during inspection. Actions might need enabling on the fork.
-- No LG TV deployment or hardware video tests were performed.
-- Runtime ABI, exported LG logging symbols (e.g. printLog), rooted marker
-  permissions, process diagnostics and VT contention all require target checks.
+- This inspection performed no new TV deployment or hardware video tests.
+  Earlier device observations are recorded separately in the C5 audit docs.
+- CI verifies the binary's exported `printLog` symbol; runtime native ABI,
+  permissions, capture ownership and hardware behaviour require device evidence.
+- The exact audited C5 library has a stubbed histogram initializer and a
+  frame-pointer ownership hazard. Its raw-frame path remains blocked; generic
+  histogram routing above is not a claim of working C5 protected capture.
 - Per-TV spatial calibration, capture-to-light latency and HDR colour transfer
   have not been measured.
 - WLED dashboard provisioning and a bidirectional vendor-output management
   HTTP API are not yet implemented. LightOutput is the internal vendor API.
 
+## Current research and next collection
+
+The separate research branch
+[`feature/wled-protocols-c5-readonly-20261017`](https://github.com/angelcode1/lg-wled-sync/tree/012d73eb0052480123444ddcc6969a309b974514)
+adds WLED DDP/RGBW support, opt-in BLENDED capture and Stage 11/12 audits.
+Its [CI run](https://github.com/angelcode1/lg-wled-sync/actions/runs/39190577350)
+also passed host and ARMv7 jobs. These additions are not represented by the
+main snapshot reviewed above. No merge or deployment was performed.
+
+See [C5 offline collection](C5_OFFLINE_COLLECTION.md) for the current capture
+blockers and Mac commands to pull five exact native files for offline analysis.
+
 ## Validation commands (host)
 
     cargo fmt --all -- --check
     cargo nextest run --locked
-    cargo clippy --bin lg-hue-sync -- -D warnings
+    cargo clippy --locked --bin lg-hue-sync -- -D warnings
     make build
     file target/armv7-unknown-linux-gnueabi/release/lg-hue-sync
 
